@@ -11,6 +11,29 @@ function splitOrigins(value?: string | null): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Match an incoming origin against an allowlist entry. Entries may be exact
+ * origins (`https://app.example.com`) or contain a single `*` for subdomain
+ * wildcards (`https://*.vercel.app`). Hostname matching is case-insensitive.
+ */
+function originMatches(entry: string, origin: string): boolean {
+  if (entry === origin) return true;
+  if (!entry.includes('*')) return false;
+  try {
+    const entryUrl = new URL(entry.replace('*', 'WILDCARD'));
+    const originUrl = new URL(origin);
+    if (entryUrl.protocol !== originUrl.protocol) return false;
+    const entryHostPattern = entryUrl.hostname.replace('wildcard', '*');
+    const escaped = entryHostPattern
+      .split('*')
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+      .join('.*');
+    return new RegExp(`^${escaped}$`, 'i').test(originUrl.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function isLocalDevOrigin(origin: string): boolean {
   if (process.env.NODE_ENV === 'production') return false;
 
@@ -80,7 +103,9 @@ async function bootstrap() {
         ...splitOrigins(settings.get().frontendUrl),
       ];
 
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+      if (allowedOrigins.some((entry) => originMatches(entry, origin))) {
+        return callback(null, true);
+      }
 
       // In development, allow Next/Vite/etc. to move to any local or LAN port.
       if (isLocalDevOrigin(origin)) return callback(null, true);
