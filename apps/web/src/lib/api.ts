@@ -6,6 +6,7 @@ import type {
   AlertCondition,
   AlertPriority,
 } from '@tradeping/types';
+import { clearAuthToken, getAuthToken } from './auth-token';
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
@@ -41,15 +42,24 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
+      const token = getAuthToken();
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...(init.headers as Record<string, string> | undefined),
+      };
       const res = await fetch(`${API_BASE}${path}`, {
-        headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
         signal: controller.signal,
         ...init,
+        headers,
       });
       clearTimeout(timer);
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { message?: string };
+        if (res.status === 401 && !path.startsWith('/auth/')) {
+          clearAuthToken();
+        }
         throw new ApiError(
           body.message ?? `Request failed: ${res.status}`,
           'http',
@@ -106,6 +116,20 @@ export interface PriceSummary {
 export interface PricePoint {
   timestamp: string;
   price: number;
+}
+
+export interface AuthUser {
+  id: string;
+  sub: string;
+  email: string;
+  name: string;
+  picture: string | null;
+}
+
+export interface AuthSession {
+  token: string;
+  user: AuthUser;
+  expiresAt: string;
 }
 
 export interface CrawlerDebugState {
@@ -183,6 +207,10 @@ export interface Watchlist {
 }
 
 export const api = {
+  loginWithGoogle: (credential: string) =>
+    request<ApiResponse<AuthSession>>('/auth/google', { method: 'POST', body: JSON.stringify({ credential }) }),
+  me: () => request<ApiResponse<AuthUser>>('/auth/me', { retries: 0 }),
+  logout: () => request<ApiResponse<{ ok: boolean }>>('/auth/logout', { method: 'POST' }),
   health: () => request<{ status: string; service: string }>('/health', { timeoutMs: 4000 }),
   stocks: () => request<ApiResponse<StockSymbol[]>>('/stocks'),
   listAlerts: () => request<ApiResponse<StockAlert[]>>('/alerts'),
@@ -269,12 +297,51 @@ export const api = {
     ),
   // ── Notification rules + template defaults ──────────────────────────────
   listNotificationRules: () => request<ApiResponse<NotificationRuleSummary[]>>('/notifications/rules'),
+  createNotificationRule: (body: NotificationRuleInput) =>
+    request<ApiResponse<NotificationRuleSummary>>('/notifications/rules', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateNotificationRule: (id: string, body: Partial<NotificationRuleInput>) =>
+    request<ApiResponse<NotificationRuleSummary>>(`/notifications/rules/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteNotificationRule: (id: string) =>
+    request<ApiResponse<{ id: string }>>(`/notifications/rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listNotificationTemplates: () =>
     request<ApiResponse<NotificationTemplateSummary[]>>('/notifications/templates'),
+  createNotificationTemplate: (body: NotificationTemplateInput) =>
+    request<ApiResponse<NotificationTemplateSummary>>('/notifications/templates', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateNotificationTemplate: (id: string, body: Partial<NotificationTemplateInput>) =>
+    request<ApiResponse<NotificationTemplateSummary>>(`/notifications/templates/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteNotificationTemplate: (id: string) =>
+    request<ApiResponse<{ id: string }>>(`/notifications/templates/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  previewNotificationTemplate: (body: { body: string; event?: string }) =>
+    request<ApiResponse<{ rendered: string }>>('/notifications/templates/preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   getDefaultNotificationTemplates: () =>
     request<ApiResponse<Record<string, string>>>('/notifications/templates/defaults'),
   listNotificationChannels: () =>
     request<ApiResponse<NotificationChannelSummary[]>>('/notifications/channels'),
+  createNotificationChannel: (body: NotificationChannelInput) =>
+    request<ApiResponse<NotificationChannelSummary>>('/notifications/channels', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateNotificationChannel: (id: string, body: Partial<NotificationChannelInput>) =>
+    request<ApiResponse<NotificationChannelSummary>>(`/notifications/channels/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
 };
 
 export interface NotificationRuleSummary {
@@ -291,6 +358,17 @@ export interface NotificationRuleSummary {
   updatedAt: string;
 }
 
+export interface NotificationRuleInput {
+  name: string;
+  event: string;
+  enabled?: boolean;
+  priority?: number;
+  filters?: Record<string, unknown>;
+  channelId: string;
+  templateId?: string | null;
+  cooldownMin?: number;
+}
+
 export interface NotificationTemplateSummary {
   id: string;
   name: string;
@@ -303,11 +381,27 @@ export interface NotificationTemplateSummary {
   updatedAt: string;
 }
 
+export interface NotificationTemplateInput {
+  name: string;
+  event: string;
+  channelId?: string | null;
+  body: string;
+  subject?: string | null;
+  isDefault?: boolean;
+}
+
 export interface NotificationChannelSummary {
   id: string;
   name: string;
   type: string;
   enabled: boolean;
+}
+
+export interface NotificationChannelInput {
+  name: string;
+  type: string;
+  enabled?: boolean;
+  config?: Record<string, unknown>;
 }
 
 export type DbColumnType = 'string' | 'number' | 'boolean' | 'datetime' | 'json' | 'string[]';
@@ -329,6 +423,10 @@ export interface DbTableSummary {
   idField: string;
   defaultSort?: { field: string; dir: 'asc' | 'desc' };
   searchableFields: string[];
+  ownerScoped?: boolean;
+  ownerField?: string;
+  noCreate?: boolean;
+  noDelete?: boolean;
 }
 
 export interface DbTableSchema extends DbTableSummary {

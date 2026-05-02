@@ -57,20 +57,28 @@ export interface UpsertChannelDto {
 export class ChannelsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(): Promise<NotificationChannel[]> {
-    const rows = await this.prisma.notificationChannel.findMany({ orderBy: { createdAt: 'asc' } });
+  async findAll(userId: string): Promise<NotificationChannel[]> {
+    const rows = await this.prisma.notificationChannel.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'asc' },
+    });
     return rows.map(toChannel);
   }
 
-  async findOne(id: string): Promise<NotificationChannel> {
-    const row = await this.prisma.notificationChannel.findUnique({ where: { id } });
+  async findOne(id: string, userId: string): Promise<NotificationChannel> {
+    const row = await this.prisma.notificationChannel.findFirst({ where: { id, userId } });
     if (!row) throw new NotFoundException(`Channel ${id} not found`);
     return toChannel(row);
   }
 
   /** Internal use — returns config WITHOUT redaction for actual sending. */
-  async findOneRaw(id: string): Promise<{ id: string; type: NotificationChannelType; enabled: boolean; config: Record<string, unknown> } | null> {
-    const row = await this.prisma.notificationChannel.findUnique({ where: { id } });
+  async findOneRaw(
+    id: string,
+    userId?: string | null,
+  ): Promise<{ id: string; type: NotificationChannelType; enabled: boolean; config: Record<string, unknown> } | null> {
+    const row = await this.prisma.notificationChannel.findFirst({
+      where: { id, ...(userId ? { userId } : {}) },
+    });
     if (!row) return null;
     return {
       id: row.id,
@@ -80,11 +88,12 @@ export class ChannelsService {
     };
   }
 
-  async create(dto: UpsertChannelDto): Promise<NotificationChannel> {
+  async create(dto: UpsertChannelDto, userId: string): Promise<NotificationChannel> {
     this.validateType(dto.type);
     const row = await this.prisma.notificationChannel.create({
       data: {
         name: dto.name.trim() || dto.type,
+        userId,
         type: dto.type,
         enabled: dto.enabled ?? true,
         config: (dto.config ?? {}) as object,
@@ -93,9 +102,9 @@ export class ChannelsService {
     return toChannel(row);
   }
 
-  async update(id: string, dto: Partial<UpsertChannelDto>): Promise<NotificationChannel> {
+  async update(id: string, dto: Partial<UpsertChannelDto>, userId: string): Promise<NotificationChannel> {
     if (dto.type) this.validateType(dto.type);
-    const existing = await this.prisma.notificationChannel.findUnique({ where: { id } });
+    const existing = await this.prisma.notificationChannel.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundException(`Channel ${id} not found`);
     const mergedConfig = dto.config
       ? mergeConfig((existing.config as Record<string, unknown>) ?? {}, dto.config)
@@ -112,15 +121,15 @@ export class ChannelsService {
     return toChannel(row);
   }
 
-  async remove(id: string): Promise<{ id: string }> {
-    const existing = await this.prisma.notificationChannel.findUnique({ where: { id } });
+  async remove(id: string, userId: string): Promise<{ id: string }> {
+    const existing = await this.prisma.notificationChannel.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundException(`Channel ${id} not found`);
     await this.prisma.notificationChannel.delete({ where: { id } });
     return { id };
   }
 
-  async test(id: string): Promise<DispatchResult> {
-    const raw = await this.findOneRaw(id);
+  async test(id: string, userId: string): Promise<DispatchResult> {
+    const raw = await this.findOneRaw(id, userId);
     if (!raw) throw new NotFoundException(`Channel ${id} not found`);
     const body = render(DEFAULT_TEMPLATES['system.test'], {
       event: 'system.test',

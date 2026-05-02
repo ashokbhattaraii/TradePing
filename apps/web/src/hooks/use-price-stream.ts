@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { API_BASE, api, type PriceSummary } from '@/lib/api';
+import { getAuthToken } from '@/lib/auth-token';
 
 interface State {
   data: PriceSummary[] | null;
@@ -52,7 +53,10 @@ export function usePriceStream(pollMs: number): State & { refetch: () => void } 
 
     const connect = () => {
       if (closed) return;
-      es = new EventSource(`${API_BASE}/crawler/prices/stream`);
+      const url = new URL(`${API_BASE.replace(/\/$/, '')}/crawler/prices/stream`, window.location.origin);
+      const token = getAuthToken();
+      if (token) url.searchParams.set('auth', token);
+      es = new EventSource(url.toString());
       es.onopen = () => {
         retryDelay = 1000;
         stopPolling();

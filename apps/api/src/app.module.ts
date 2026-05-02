@@ -10,11 +10,13 @@ import { SettingsModule } from './settings/settings.module';
 import { WatchlistModule } from './watchlist/watchlist.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { DatabaseModule } from './database/database.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
+    AuthModule,
     LogsModule,
     HealthModule,
     StocksModule,

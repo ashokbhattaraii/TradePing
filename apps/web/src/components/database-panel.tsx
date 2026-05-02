@@ -273,7 +273,7 @@ export function DatabasePanel() {
             <RefreshCw className={cn('h-3.5 w-3.5', loadingRows && 'animate-spin')} />
             Refresh
           </Button>
-          {schema && (
+          {schema && !activeTable?.noCreate && (
             <Button size="sm" onClick={() => setEditing({ mode: 'create', row: null })}>
               <Plus className="h-3.5 w-3.5" />
               New Row
@@ -425,10 +425,12 @@ export function DatabasePanel() {
                 <Button variant="secondary" size="sm" onClick={() => setSelected(new Set())}>
                   Clear
                 </Button>
-                <Button variant="danger" size="sm" onClick={handleBulkDelete}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete selected
-                </Button>
+                {!activeTable?.noDelete && (
+                  <Button variant="danger" size="sm" onClick={handleBulkDelete}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                    Delete selected
+                  </Button>
+                )}
               </div>
             </div>
           )}
@@ -547,14 +549,16 @@ export function DatabasePanel() {
                               >
                                 <Pencil className="h-3.5 w-3.5" />
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => handleDelete(row)}
-                                className="rounded-md p-1.5 text-red-300/70 transition-colors hover:bg-red-400/10 hover:text-red-200"
-                                aria-label="Delete row"
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </button>
+                              {!activeTable?.noDelete && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleDelete(row)}
+                                  className="rounded-md p-1.5 text-red-300/70 transition-colors hover:bg-red-400/10 hover:text-red-200"
+                                  aria-label="Delete row"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>

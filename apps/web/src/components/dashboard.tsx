@@ -16,6 +16,7 @@ import {
   Flame,
   Gauge,
   LayoutDashboard,
+  LogOut,
   RefreshCw,
   Search,
   Settings2,
@@ -24,6 +25,7 @@ import {
   Terminal,
   TrendingDown,
   TrendingUp,
+  UserCircle,
   Zap,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -42,6 +44,7 @@ import { WatchlistPanel } from './watchlist-panel';
 import { ToastProvider, useToast } from './ui/toast';
 import { ConnectionBanner } from './connection-banner';
 import { PriceChart } from './price-chart';
+import { useAuth } from './auth-provider';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card } from './ui/card';
@@ -88,6 +91,7 @@ export function Dashboard() {
 
 function DashboardInner() {
   const toast = useToast();
+  const { user, signOut } = useAuth();
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<GlobalFilter>('all');
@@ -282,9 +286,32 @@ function DashboardInner() {
                 </div>
               </div>
             </div>
-            <Badge tone={apiOnline ? 'success' : 'danger'} dot>
-              {apiOnline ? 'Online' : 'Offline'}
-            </Badge>
+            <div className="flex shrink-0 items-center gap-2">
+              <Badge tone={apiOnline ? 'success' : 'danger'} dot>
+                {apiOnline ? 'Online' : 'Offline'}
+              </Badge>
+              <div className="hidden max-w-44 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.03] px-2 py-1.5 sm:flex">
+                {user.picture ? (
+                  <span
+                    className="h-5 w-5 shrink-0 rounded-full bg-cover bg-center"
+                    style={{ backgroundImage: `url(${user.picture})` }}
+                    aria-hidden="true"
+                  />
+                ) : (
+                  <UserCircle className="h-5 w-5 text-white/45" aria-hidden="true" />
+                )}
+                <span className="truncate text-xs font-medium text-white/65">{user.email}</span>
+              </div>
+              <button
+                type="button"
+                aria-label="Sign out"
+                title="Sign out"
+                onClick={signOut}
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 bg-white/[0.03] text-white/50 transition-colors hover:border-white/20 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
+              >
+                <LogOut className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
           </div>
 
           <div className="grid gap-2 sm:grid-cols-[minmax(220px,1fr)_180px_auto] lg:w-[720px]">

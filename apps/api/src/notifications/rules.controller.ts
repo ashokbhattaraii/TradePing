@@ -1,29 +1,29 @@
-import { Controller, Get } from '@nestjs/common';
-import type { NotificationRule, NotificationEvent, NotificationRuleFilters } from '@tradeping/types';
-import { PrismaService } from '../prisma/prisma.service';
+import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import { CurrentUser } from '../auth/current-user.decorator';
+import type { AuthUser } from '../auth/auth.types';
+import { RulesService, type UpsertRuleDto } from './rules.service';
 
 @Controller('notifications/rules')
 export class RulesController {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly rules: RulesService) {}
 
   @Get()
-  async list() {
-    const rows = await this.prisma.notificationRule.findMany({
-      orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
-    });
-    const data: NotificationRule[] = rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      event: row.event as NotificationEvent,
-      enabled: row.enabled,
-      priority: row.priority,
-      filters: (row.filters ?? {}) as NotificationRuleFilters,
-      channelId: row.channelId,
-      templateId: row.templateId,
-      cooldownMin: row.cooldownMin,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-    }));
-    return { success: true, data };
+  async list(@CurrentUser() user: AuthUser) {
+    return { success: true, data: await this.rules.findAll(user.id) };
+  }
+
+  @Post()
+  async create(@Body() body: UpsertRuleDto, @CurrentUser() user: AuthUser) {
+    return { success: true, data: await this.rules.create(body, user.id) };
+  }
+
+  @Patch(':id')
+  async update(@Param('id') id: string, @Body() body: Partial<UpsertRuleDto>, @CurrentUser() user: AuthUser) {
+    return { success: true, data: await this.rules.update(id, body, user.id) };
+  }
+
+  @Delete(':id')
+  async remove(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    return { success: true, data: await this.rules.remove(id, user.id) };
   }
 }

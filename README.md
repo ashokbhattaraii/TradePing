@@ -2,7 +2,7 @@
 
 A crawler-based **NEPSE stock price alert system**. Pick a stock, set a target price, choose a condition, and TradePing's background crawler watches the price for you and updates the dashboard in real time.
 
-> Prototype build — in-memory storage only, no login, no database.
+> Prototype build — Google sign-in protects the dashboard and API.
 
 ## Features
 
@@ -11,6 +11,7 @@ A crawler-based **NEPSE stock price alert system**. Pick a stock, set a target p
 - Live, terminal-style log stream of every crawler event
 - Auto-refreshing dashboard (alerts + logs poll every 5 s)
 - Manual "Run check now" trigger
+- Google OAuth sign-in for dashboard and API access
 - Graceful **mock-price fallback** when the live crawl fails
 - Vercel/Linear-inspired dark dashboard with glassmorphism + framer-motion
 
@@ -103,6 +104,11 @@ Base URL: `http://localhost:4000`
 |----------------------------|-----------------------------------------------|------------------------------------|
 | `PORT`                     | `4000`                                        | API port                           |
 | `FRONTEND_URL`             | `http://localhost:3000`                       | CORS allowed origin                |
+| `GOOGLE_CLIENT_ID`         |                                               | Google OAuth web client ID used to verify sign-in |
+| `AUTH_SESSION_SECRET`      |                                               | Secret used to sign TradePing session tokens |
+| `AUTH_SESSION_DAYS`        | `7`                                           | Session lifetime after Google sign-in |
+| `GOOGLE_ALLOWED_EMAILS`    |                                               | Optional comma-separated allowlist |
+| `GOOGLE_ALLOWED_DOMAINS`   |                                               | Optional comma-separated domain allowlist |
 | `NEPSE_SOURCE_URL`         | `https://www.nepsealpha.com/trading/chart`    | Page Playwright crawls             |
 | `CRAWLER_INTERVAL_SECONDS` | `30`                                          | Auto-check interval                |
 
@@ -111,6 +117,11 @@ Base URL: `http://localhost:4000`
 | Variable               | Default                   |
 |------------------------|---------------------------|
 | `NEXT_PUBLIC_API_URL`  | `http://localhost:4000`   |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` |                    |
+
+For Google OAuth, use the same Google OAuth web client ID for `GOOGLE_CLIENT_ID` and
+`NEXT_PUBLIC_GOOGLE_CLIENT_ID`. After changing any `NEXT_PUBLIC_*` value, rebuild or
+restart the web app so Next.js can inline the public env value.
 
 ## How the crawler works
 
@@ -146,7 +157,7 @@ Mock vs. live source is recorded on every `CrawlerResult`, so the UI/logs make i
 
 - **In-memory only** — alerts and logs vanish when the API restarts.
 - **Crawler selectors are best-effort** — without a stable public API or known DOM selector for NepseAlpha's chart, live extraction often falls back to mock data.
-- No authentication, no per-user state.
+- Authentication is Google-only; user-owned alerts, watchlists, notification channels, templates, and rules are scoped by the signed-in user.
 - Logs are capped at 500 entries (ring buffer).
 
 ## Future improvements

@@ -90,6 +90,28 @@ export interface SystemSettings {
 
 type SettingKey = Exclude<keyof SystemSettings, 'port'>;
 
+/**
+ * Keys that affect shared system services (the crawler process, CORS, port).
+ * These are stored in the global `Setting` table and applied process-wide.
+ * Everything else is per-user and stored in `UserSetting`.
+ */
+const SYSTEM_KEYS: ReadonlySet<SettingKey> = new Set<SettingKey>([
+  'crawlerIntervalSeconds',
+  'pageCacheTtlSeconds',
+  'crawlerTimeoutSeconds',
+  'crawlerRetryCount',
+  'marketHoursOnly',
+  'crawlerMaxSymbolsPerTick',
+  'crawlerMockOnFetchFail',
+  'crawlerPrefetchOnStart',
+  'crawlerUserAgent',
+  'crawlerUseProxy',
+  'proxyUrl',
+  'enableAdvancedLogging',
+  'crawlerLogFailedRequests',
+  'frontendUrl',
+]);
+
 const BOOL_KEYS: SettingKey[] = [
   'marketHoursOnly',
   'crawlerMockOnFetchFail',
@@ -187,9 +209,17 @@ export class SettingsService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    // Load persisted settings from DB, overriding env defaults
-    const rows = await this.prisma.setting.findMany();
+    // Load persisted global settings from DB, overriding env defaults
+    const rows = await this.prisma.setting.findMany({ where: { userId: null } });
     const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    this.current = { ...this.current, ...this.parsePatch(map) };
+
+    // Broadcast initial settings to services
+    this.pushSettings();
+    this.logs.info('Settings built from DB and applied safely');
+  }
+
+  private parsePatch(map: Record<string, string>): Partial<SystemSettings> {
     const patch: Partial<SystemSettings> = {};
     for (const [k, v] of Object.entries(map)) {
       if (k === 'port') continue;
@@ -202,11 +232,7 @@ export class SettingsService implements OnModuleInit {
         (patch as Record<string, unknown>)[key] = Number(v);
       }
     }
-    this.current = { ...this.current, ...patch };
-    
-    // Broadcast initial settings to services
-    this.pushSettings();
-    this.logs.info('Settings built from DB and applied safely');
+    return patch;
   }
 
   private pushSettings() {
@@ -230,19 +256,66 @@ export class SettingsService implements OnModuleInit {
     });
   }
 
+  /** Global settings (used by crawler/system process). */
   get(): SystemSettings {
     return { ...this.current };
   }
 
+  /** Effective settings for a specific user: global merged with their overrides. */
+  async getForUser(userId: string): Promise<SystemSettings> {
+    const rows = await this.prisma.userSetting.findMany({ where: { userId } });
+    const map = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    return { ...this.current, ...this.parsePatch(map) };
+  }
+
+  /**
+   * Update settings for a user. System keys go to the global Setting table
+   * (and are applied to the running crawler/alert services). User-facing keys
+   * go to that user's UserSetting overrides.
+   */
+  async updateForUser(
+    userId: string,
+    patch: Partial<Omit<SystemSettings, 'port'>>,
+  ): Promise<SystemSettings> {
+    const systemPatch: Record<string, unknown> = {};
+    const userPatch: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(patch)) {
+      if (k === 'port') continue;
+      if (SYSTEM_KEYS.has(k as SettingKey)) systemPatch[k] = v;
+      else userPatch[k] = v;
+    }
+
+    if (Object.keys(systemPatch).length > 0) {
+      this.current = { ...this.current, ...(systemPatch as Partial<SystemSettings>) };
+      await this.persistGlobal(systemPatch);
+      this.pushSettings();
+    }
+
+    if (Object.keys(userPatch).length > 0) {
+      await Promise.all(
+        Object.entries(userPatch).map(([key, value]) =>
+          this.prisma.userSetting.upsert({
+            where: { userId_key: { userId, key } },
+            update: { value: String(value) },
+            create: { userId, key, value: String(value) },
+          }),
+        ),
+      );
+    }
+
+    return this.getForUser(userId);
+  }
+
+  /** Legacy global update — kept for internal callers; persists everything globally. */
   async update(patch: Partial<Omit<SystemSettings, 'port'>>): Promise<SystemSettings> {
     this.current = { ...this.current, ...patch };
-    await this.persist();
+    await this.persistGlobal(patch as Record<string, unknown>);
     this.pushSettings();
     return this.get();
   }
 
-  private async persist(): Promise<void> {
-    const entries = Object.entries(this.current)
+  private async persistGlobal(patch: Record<string, unknown>): Promise<void> {
+    const entries = Object.entries(patch)
       .filter(([k]) => k !== 'port')
       .map(([key, value]) => ({
         where: { key },
@@ -250,5 +323,10 @@ export class SettingsService implements OnModuleInit {
         create: { key, value: String(value) },
       }));
     await Promise.all(entries.map((args) => this.prisma.setting.upsert(args)));
+  }
+
+  /** Whether a key is a per-user setting (vs system-wide). */
+  static isUserKey(key: string): boolean {
+    return key !== 'port' && !SYSTEM_KEYS.has(key as SettingKey);
   }
 }

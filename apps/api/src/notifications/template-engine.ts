@@ -22,7 +22,7 @@ export function render(template: string, ctx: TemplateContext): string {
   let prev = '';
   while (out !== prev) {
     prev = out;
-    out = out.replace(/\{\{#([\w.]+)\}\}([\s\S]*?)\{\{\/\1\}\}/g, (_m, key: string, body: string) => {
+    out = out.replace(/\{\{\s*#\s*([\w.]+)\s*\}\}([\s\S]*?)\{\{\s*\/\s*\1\s*\}\}/g, (_m, key: string, body: string) => {
       const val = flat[key];
       const truthy = Array.isArray(val) ? val.length > 0 : Boolean(val);
       return truthy ? body : '';
@@ -30,7 +30,7 @@ export function render(template: string, ctx: TemplateContext): string {
   }
 
   // Variable substitution.
-  out = out.replace(/\{\{([\w.]+)\}\}/g, (_m, key: string) => {
+  out = out.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, key: string) => {
     const val = flat[key];
     if (val === undefined || val === null) return '';
     return String(val);

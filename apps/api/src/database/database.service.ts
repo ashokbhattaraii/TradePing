@@ -21,9 +21,41 @@ export interface TableMeta {
   defaultSort?: { field: string; dir: 'asc' | 'desc' };
   searchableFields: string[];
   columns: ColumnMeta[];
+  ownerScoped?: boolean;
+  /**
+   * Field that identifies row ownership. Defaults to 'userId'. For tables
+   * whose primary key is itself the user id (e.g. the User table), set this
+   * to 'id' so the row is filtered by the caller's id.
+   */
+  ownerField?: string;
+  /** Disallow create through the generic database controller. */
+  noCreate?: boolean;
+  /** Disallow delete through the generic database controller. */
+  noDelete?: boolean;
 }
 
 const TABLES: TableMeta[] = [
+  {
+    name: 'user',
+    label: 'My Profile',
+    description: 'Your authenticated account record. Edit your display name or profile picture.',
+    prismaModel: 'user',
+    idField: 'id',
+    ownerScoped: true,
+    ownerField: 'id',
+    noCreate: true,
+    noDelete: true,
+    searchableFields: ['email', 'name'],
+    columns: [
+      { name: 'id', type: 'string', isId: true, isReadonly: true },
+      { name: 'email', type: 'string', isReadonly: true },
+      { name: 'name', type: 'string' },
+      { name: 'picture', type: 'string', optional: true },
+      { name: 'googleSub', type: 'string', isReadonly: true },
+      { name: 'createdAt', type: 'datetime', isReadonly: true },
+      { name: 'updatedAt', type: 'datetime', isReadonly: true },
+    ],
+  },
   {
     name: 'alert',
     label: 'Alerts',
@@ -32,6 +64,7 @@ const TABLES: TableMeta[] = [
     idField: 'id',
     defaultSort: { field: 'createdAt', dir: 'desc' },
     searchableFields: ['symbol', 'status', 'condition', 'priority', 'note'],
+    ownerScoped: true,
     columns: [
       { name: 'id', type: 'string', isId: true, isReadonly: true },
       { name: 'symbol', type: 'string' },
@@ -53,6 +86,7 @@ const TABLES: TableMeta[] = [
     idField: 'id',
     defaultSort: { field: 'updatedAt', dir: 'desc' },
     searchableFields: ['name'],
+    ownerScoped: true,
     columns: [
       { name: 'id', type: 'string', isId: true, isReadonly: true },
       { name: 'name', type: 'string' },
@@ -97,6 +131,7 @@ const TABLES: TableMeta[] = [
     idField: 'id',
     defaultSort: { field: 'updatedAt', dir: 'desc' },
     searchableFields: ['name', 'type'],
+    ownerScoped: true,
     columns: [
       { name: 'id', type: 'string', isId: true, isReadonly: true },
       { name: 'name', type: 'string' },
@@ -115,6 +150,7 @@ const TABLES: TableMeta[] = [
     idField: 'id',
     defaultSort: { field: 'updatedAt', dir: 'desc' },
     searchableFields: ['name', 'event'],
+    ownerScoped: true,
     columns: [
       { name: 'id', type: 'string', isId: true, isReadonly: true },
       { name: 'name', type: 'string' },
@@ -135,6 +171,7 @@ const TABLES: TableMeta[] = [
     idField: 'id',
     defaultSort: { field: 'priority', dir: 'desc' },
     searchableFields: ['name', 'event'],
+    ownerScoped: true,
     columns: [
       { name: 'id', type: 'string', isId: true, isReadonly: true },
       { name: 'name', type: 'string' },
@@ -175,12 +212,12 @@ export class DatabaseService {
     return TABLES.map(({ columns: _columns, ...rest }) => rest);
   }
 
-  async stats() {
+  async stats(userId: string) {
     const out: Record<string, number> = {};
     await Promise.all(
       TABLES.map(async (t) => {
         try {
-          out[t.name] = await this.model(t).count();
+          out[t.name] = await this.model(t).count({ where: this.ownerWhere(t, userId) });
         } catch {
           out[t.name] = 0;
         }
@@ -201,6 +238,7 @@ export class DatabaseService {
 
   private model(table: TableMeta): {
     findMany: (args: unknown) => Promise<unknown[]>;
+    findFirst: (args: unknown) => Promise<unknown | null>;
     count: (args?: unknown) => Promise<number>;
     create: (args: unknown) => Promise<unknown>;
     update: (args: unknown) => Promise<unknown>;
@@ -214,19 +252,22 @@ export class DatabaseService {
 
   async list(
     name: string,
+    userId: string,
     opts: { page: number; limit: number; search?: string; sortField?: string; sortDir?: 'asc' | 'desc' },
   ) {
     const table = this.getTable(name);
     const limit = Math.min(Math.max(opts.limit, 1), 500);
     const page = Math.max(opts.page, 1);
 
-    const where = opts.search
+    const searchWhere = opts.search
       ? {
           OR: table.searchableFields.map((f) => ({
             [f]: { contains: opts.search, mode: 'insensitive' as const },
           })),
         }
       : undefined;
+    const ownerWhere = this.ownerWhere(table, userId);
+    const where = ownerWhere && searchWhere ? { AND: [ownerWhere, searchWhere] } : ownerWhere ?? searchWhere;
 
     const sortField = opts.sortField && table.columns.some((c) => c.name === opts.sortField)
       ? opts.sortField
@@ -302,29 +343,44 @@ export class DatabaseService {
     return out;
   }
 
-  async create(name: string, payload: Record<string, unknown>) {
+  async create(name: string, payload: Record<string, unknown>, userId: string) {
     const table = this.getTable(name);
+    if (table.noCreate) {
+      throw new BadRequestException(`Creating rows in ${table.label} is not allowed`);
+    }
     const data = this.coerce(table, payload, true);
+    if (table.ownerScoped && (table.ownerField ?? 'userId') === 'userId') {
+      data.userId = userId;
+    }
     return this.model(table).create({ data });
   }
 
-  async update(name: string, id: string, payload: Record<string, unknown>) {
+  async update(name: string, id: string, payload: Record<string, unknown>, userId: string) {
     const table = this.getTable(name);
+    await this.assertOwnsRow(table, id, userId);
     const data = this.coerce(table, payload, false);
     return this.model(table).update({ where: { [table.idField]: id }, data });
   }
 
-  async remove(name: string, id: string) {
+  async remove(name: string, id: string, userId: string) {
     const table = this.getTable(name);
+    if (table.noDelete) {
+      throw new BadRequestException(`Deleting rows in ${table.label} is not allowed`);
+    }
+    await this.assertOwnsRow(table, id, userId);
     await this.model(table).delete({ where: { [table.idField]: id } });
     return { id };
   }
 
-  async removeMany(name: string, ids: string[]) {
+  async removeMany(name: string, ids: string[], userId: string) {
     const table = this.getTable(name);
+    if (table.noDelete) {
+      throw new BadRequestException(`Deleting rows in ${table.label} is not allowed`);
+    }
     let deleted = 0;
     for (const id of ids) {
       try {
+        await this.assertOwnsRow(table, id, userId);
         await this.model(table).delete({ where: { [table.idField]: id } });
         deleted += 1;
       } catch {
@@ -334,15 +390,17 @@ export class DatabaseService {
     return { deleted };
   }
 
-  async export(name: string, opts: { search?: string; sortField?: string; sortDir?: 'asc' | 'desc' }) {
+  async export(name: string, userId: string, opts: { search?: string; sortField?: string; sortDir?: 'asc' | 'desc' }) {
     const table = this.getTable(name);
-    const where = opts.search
+    const searchWhere = opts.search
       ? {
           OR: table.searchableFields.map((f) => ({
             [f]: { contains: opts.search, mode: 'insensitive' as const },
           })),
         }
       : undefined;
+    const ownerWhere = this.ownerWhere(table, userId);
+    const where = ownerWhere && searchWhere ? { AND: [ownerWhere, searchWhere] } : ownerWhere ?? searchWhere;
     const sortField = opts.sortField && table.columns.some((c) => c.name === opts.sortField)
       ? opts.sortField
       : table.defaultSort?.field;
@@ -350,5 +408,20 @@ export class DatabaseService {
     const orderBy = sortField ? { [sortField]: sortDir } : undefined;
     const rows = await this.model(table).findMany({ where, orderBy });
     return { table, rows };
+  }
+
+  private ownerWhere(table: TableMeta, userId: string) {
+    if (!table.ownerScoped) return undefined;
+    const field = table.ownerField ?? 'userId';
+    return { [field]: userId };
+  }
+
+  private async assertOwnsRow(table: TableMeta, id: string, userId: string) {
+    if (!table.ownerScoped) return;
+    const field = table.ownerField ?? 'userId';
+    const row = await this.model(table).findFirst({
+      where: { [table.idField]: id, [field]: userId },
+    });
+    if (!row) throw new NotFoundException(`Row not found in ${table.name}: ${id}`);
   }
 }

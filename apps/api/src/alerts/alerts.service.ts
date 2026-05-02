@@ -5,6 +5,7 @@ import { CreateAlertDto } from './dto/create-alert.dto';
 import { LogsService } from '../logs/logs.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { SettingsService } from '../settings/settings.service';
 
 interface AlertRuleSettings {
   autoDeleteTriggeredMinutes: number;
@@ -19,6 +20,7 @@ const PRIORITY_ORDER: Record<AlertPriority, number> = { HIGH: 0, MEDIUM: 1, LOW:
 
 function toAlert(row: {
   id: string;
+  userId: string | null;
   symbol: string;
   targetPrice: number;
   condition: string;
@@ -31,6 +33,7 @@ function toAlert(row: {
 }): StockAlert {
   return {
     id: row.id,
+    userId: row.userId,
     symbol: row.symbol,
     targetPrice: row.targetPrice,
     condition: row.condition as StockAlert['condition'],
@@ -59,24 +62,36 @@ export class AlertsService {
     private readonly logs: LogsService,
     @Inject(forwardRef(() => NotificationsService))
     private readonly notifications: NotificationsService,
+    @Inject(forwardRef(() => SettingsService))
+    private readonly settings: SettingsService,
   ) {}
 
   applyAlertSettings(settings: Partial<AlertRuleSettings>) {
     this.rules = { ...this.rules, ...settings };
   }
 
-  async findAll(): Promise<StockAlert[]> {
-    await this.pruneAlerts();
-    const rows = await this.prisma.alert.findMany({ orderBy: { createdAt: 'desc' } });
-    return rows
-      .map(toAlert)
-      .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+  /** Resolve per-user alert rule settings, falling back to globals. */
+  private async rulesForUser(userId: string | null | undefined): Promise<AlertRuleSettings> {
+    if (!userId) return this.rules;
+    try {
+      const s = await this.settings.getForUser(userId);
+      return {
+        autoDeleteTriggeredMinutes: s.alertAutoDeleteTriggeredMinutes,
+        maxPerSymbol: s.alertMaxPerSymbol,
+        expiryHours: s.alertExpiryHours,
+        repeatAfterMinutes: s.alertRepeatAfterMinutes,
+        notifyOnCreate: s.alertNotifyOnCreate,
+        notifyOnExpiry: s.alertNotifyOnExpiry,
+      };
+    } catch {
+      return this.rules;
+    }
   }
 
-  async findActive(): Promise<StockAlert[]> {
-    await this.pruneAlerts();
+  async findAll(userId: string): Promise<StockAlert[]> {
+    await this.pruneAlerts(userId);
     const rows = await this.prisma.alert.findMany({
-      where: { status: 'ACTIVE' },
+      where: { userId },
       orderBy: { createdAt: 'desc' },
     });
     return rows
@@ -84,21 +99,34 @@ export class AlertsService {
       .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
   }
 
-  async create(dto: CreateAlertDto): Promise<StockAlert> {
+  async findActive(userId?: string): Promise<StockAlert[]> {
+    await this.pruneAlerts(userId);
+    const rows = await this.prisma.alert.findMany({
+      where: { status: 'ACTIVE', ...(userId ? { userId } : {}) },
+      orderBy: { createdAt: 'desc' },
+    });
+    return rows
+      .map(toAlert)
+      .sort((a, b) => PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]);
+  }
+
+  async create(dto: CreateAlertDto, userId: string): Promise<StockAlert> {
     const symbol = STOCK_ALIASES[dto.symbol] ?? dto.symbol;
-    if (this.rules.maxPerSymbol > 0) {
+    const rules = await this.rulesForUser(userId);
+    if (rules.maxPerSymbol > 0) {
       const count = await this.prisma.alert.count({
-        where: { symbol, status: 'ACTIVE' },
+        where: { symbol, status: 'ACTIVE', userId },
       });
-      if (count >= this.rules.maxPerSymbol) {
+      if (count >= rules.maxPerSymbol) {
         throw new BadRequestException(
-          `Maximum ${this.rules.maxPerSymbol} active alert${this.rules.maxPerSymbol === 1 ? '' : 's'} per symbol`,
+          `Maximum ${rules.maxPerSymbol} active alert${rules.maxPerSymbol === 1 ? '' : 's'} per symbol`,
         );
       }
     }
     const row = await this.prisma.alert.create({
       data: {
         id: randomUUID(),
+        userId,
         symbol,
         targetPrice: dto.targetPrice,
         condition: dto.condition,
@@ -109,14 +137,14 @@ export class AlertsService {
     });
     this.logs.info(`Alert created for ${row.symbol} ${row.condition} Rs. ${row.targetPrice}`);
     const alert = toAlert(row);
-    if (this.rules.notifyOnCreate) {
+    if (rules.notifyOnCreate || (await this.notifications.hasEnabledRulesForEvent('alert.created', userId))) {
       void this.notifications.notifyAlertCreated(alert);
     }
     return alert;
   }
 
-  async remove(id: string): Promise<{ id: string }> {
-    const row = await this.prisma.alert.findUnique({ where: { id } });
+  async remove(id: string, userId: string): Promise<{ id: string }> {
+    const row = await this.prisma.alert.findFirst({ where: { id, userId } });
     if (!row) throw new NotFoundException(`Alert ${id} not found`);
     await this.prisma.alert.delete({ where: { id } });
     this.logs.info(`Alert removed for ${row.symbol}`);
@@ -131,7 +159,9 @@ export class AlertsService {
     this.logs.info(
       `Alert triggered: ${row.symbol} ${row.condition} Rs. ${row.targetPrice} @ Rs. ${price}${row.priority !== 'MEDIUM' ? ` [${row.priority}]` : ''}`,
     );
-    if (this.rules.repeatAfterMinutes > 0) {
+    const rules = await this.rulesForUser(row.userId);
+    if (rules.repeatAfterMinutes > 0) {
+      const repeatMin = rules.repeatAfterMinutes;
       setTimeout(() => {
         void this.prisma.alert
           .findUnique({ where: { id } })
@@ -144,9 +174,9 @@ export class AlertsService {
             }
           })
           .then((a) => {
-            if (a) this.logs.info(`Alert re-activated: ${a.symbol} (repeat every ${this.rules.repeatAfterMinutes}min)`);
+            if (a) this.logs.info(`Alert re-activated: ${a.symbol} (repeat every ${repeatMin}min)`);
           });
-      }, this.rules.repeatAfterMinutes * 60_000);
+      }, repeatMin * 60_000);
     }
   }
 
@@ -157,20 +187,22 @@ export class AlertsService {
     });
   }
 
-  private async pruneAlerts(): Promise<void> {
+  private async pruneAlerts(userId?: string): Promise<void> {
+    const ownerWhere = userId ? { userId } : {};
+    const rules = await this.rulesForUser(userId);
     const now = new Date();
-    if (this.rules.autoDeleteTriggeredMinutes > 0) {
-      const cutoff = new Date(now.getTime() - this.rules.autoDeleteTriggeredMinutes * 60_000);
+    if (rules.autoDeleteTriggeredMinutes > 0) {
+      const cutoff = new Date(now.getTime() - rules.autoDeleteTriggeredMinutes * 60_000);
       await this.prisma.alert.deleteMany({
-        where: { status: 'TRIGGERED', triggeredAt: { lt: cutoff } },
+        where: { ...ownerWhere, status: 'TRIGGERED', triggeredAt: { lt: cutoff } },
       });
     }
-    if (this.rules.expiryHours > 0) {
-      const cutoff = new Date(now.getTime() - this.rules.expiryHours * 3_600_000);
-      
-      if (this.rules.notifyOnExpiry) {
+    if (rules.expiryHours > 0) {
+      const cutoff = new Date(now.getTime() - rules.expiryHours * 3_600_000);
+
+      if (rules.notifyOnExpiry || (await this.notifications.hasEnabledRulesForEvent('alert.expired', userId))) {
         const expired = await this.prisma.alert.findMany({
-          where: { status: 'ACTIVE', createdAt: { lt: cutoff } },
+          where: { ...ownerWhere, status: 'ACTIVE', createdAt: { lt: cutoff } },
         });
         for (const row of expired) {
           void this.notifications.notifyAlertExpired(toAlert(row));
@@ -178,7 +210,7 @@ export class AlertsService {
       }
 
       await this.prisma.alert.deleteMany({
-        where: { status: 'ACTIVE', createdAt: { lt: cutoff } },
+        where: { ...ownerWhere, status: 'ACTIVE', createdAt: { lt: cutoff } },
       });
     }
   }

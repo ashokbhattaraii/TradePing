@@ -6,8 +6,31 @@ datasource db {
   provider = "postgresql"
 }
 
+model User {
+  id                    String                 @id @default(cuid())
+  googleSub             String                 @unique
+  email                 String                 @unique
+  name                  String
+  picture               String?
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+  alerts                Alert[]
+  watchlists            Watchlist[]
+  logs                  Log[]
+  settings              Setting[]
+  notificationChannels  NotificationChannel[]
+  notificationTemplates NotificationTemplate[]
+  notificationRules     NotificationRule[]
+  priceHistory          PriceHistory[]
+  userSettings          UserSetting[]
+
+  @@index([email])
+}
+
 model Alert {
   id               String    @id
+  userId           String?
+  user             User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
   symbol           String
   targetPrice      Float
   condition        String
@@ -18,35 +41,61 @@ model Alert {
   createdAt        DateTime  @default(now())
   triggeredAt      DateTime?
 
+  @@index([userId])
+  @@index([userId, status])
   @@index([status])
   @@index([symbol])
 }
 
 model Watchlist {
   id            String   @id
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
   name          String
   symbols       String[]
   symbolAddedAt Json     @default("{}")
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  @@index([userId])
 }
 
 model Log {
   id        String   @id
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
   level     String
   message   String
   createdAt DateTime @default(now())
 
+  @@index([userId])
   @@index([createdAt(sort: Desc)])
 }
 
 model Setting {
-  key   String @id
-  value String
+  key    String @id
+  userId String?
+  user   User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  value  String
+
+  @@index([userId])
+}
+
+model UserSetting {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key    String
+  value  String
+
+  @@unique([userId, key])
+  @@index([userId])
 }
 
 model NotificationChannel {
   id          String                 @id @default(cuid())
+  userId      String?
+  user        User?                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   name        String
   type        String
   enabled     Boolean                @default(true)
@@ -56,11 +105,14 @@ model NotificationChannel {
   rules       NotificationRule[]
   templates   NotificationTemplate[]
 
+  @@index([userId])
   @@index([type])
 }
 
 model NotificationTemplate {
   id        String              @id @default(cuid())
+  userId    String?
+  user      User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
   name      String
   event     String
   channelId String?
@@ -72,12 +124,15 @@ model NotificationTemplate {
   updatedAt DateTime            @updatedAt
   rules     NotificationRule[]
 
+  @@index([userId])
   @@index([event])
   @@index([channelId])
 }
 
 model NotificationRule {
   id            String                @id @default(cuid())
+  userId        String?
+  user          User?                 @relation(fields: [userId], references: [id], onDelete: Cascade)
   name          String
   event         String
   enabled       Boolean               @default(true)
@@ -91,15 +146,19 @@ model NotificationRule {
   createdAt     DateTime              @default(now())
   updatedAt     DateTime              @updatedAt
 
+  @@index([userId])
   @@index([event, enabled])
 }
 
 model PriceHistory {
   id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
   symbol    String
   price     Float
   source    String
   timestamp DateTime @default(now())
 
+  @@index([userId])
   @@index([symbol, timestamp(sort: Desc)])
 }

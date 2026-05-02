@@ -4,6 +4,7 @@ export type AlertStatus = 'ACTIVE' | 'TRIGGERED';
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS';
 export interface StockAlert {
     id: string;
+    userId?: string | null;
     symbol: StockSymbol;
     targetPrice: number;
     condition: AlertCondition;

@@ -37,8 +37,28 @@ export interface UpsertTemplateDto {
   isDefault?: boolean;
 }
 
+const MAX_TEMPLATE_LENGTH = 1000;
+const COMMON_TEMPLATE_KEYS = new Set(['event', 'timestamp']);
+const ALERT_TEMPLATE_KEYS = new Set([
+  'alert.symbol',
+  'alert.condition',
+  'alert.targetPrice',
+  'alert.priority',
+  'alert.note',
+  'alert.status',
+  'alert.lastCheckedPrice',
+  'alert.createdAt',
+  'alert.triggeredAt',
+  'price',
+  'symbol',
+  'condition',
+  'target',
+  'note',
+]);
+
 const SAMPLE_ALERT: StockAlert = {
   id: 'sample-id',
+  userId: 'sample-user-id',
   symbol: 'NABIL',
   targetPrice: 1250,
   condition: 'ABOVE',
@@ -54,13 +74,16 @@ const SAMPLE_ALERT: StockAlert = {
 export class TemplatesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findAll(): Promise<NotificationTemplate[]> {
-    const rows = await this.prisma.notificationTemplate.findMany({ orderBy: { createdAt: 'asc' } });
+  async findAll(userId: string): Promise<NotificationTemplate[]> {
+    const rows = await this.prisma.notificationTemplate.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'asc' },
+    });
     return rows.map(toTemplate);
   }
 
-  async findOne(id: string): Promise<NotificationTemplate> {
-    const row = await this.prisma.notificationTemplate.findUnique({ where: { id } });
+  async findOne(id: string, userId: string): Promise<NotificationTemplate> {
+    const row = await this.prisma.notificationTemplate.findFirst({ where: { id, userId } });
     if (!row) throw new NotFoundException(`Template ${id} not found`);
     return toTemplate(row);
   }
@@ -70,22 +93,26 @@ export class TemplatesService {
     templateId?: string | null;
     event: NotificationEvent;
     channelId: string;
+    userId?: string | null;
     ctx: TemplateContext;
   }): Promise<{ body: string; subject: string | null }> {
     let template: NotificationTemplate | null = null;
+    const ownerWhere = opts.userId ? { userId: opts.userId } : {};
     if (opts.templateId) {
-      const row = await this.prisma.notificationTemplate.findUnique({ where: { id: opts.templateId } });
-      if (row) template = toTemplate(row);
-    }
-    if (!template) {
       const row = await this.prisma.notificationTemplate.findFirst({
-        where: { event: opts.event, channelId: opts.channelId, isDefault: true },
+        where: { id: opts.templateId, ...ownerWhere },
       });
       if (row) template = toTemplate(row);
     }
     if (!template) {
       const row = await this.prisma.notificationTemplate.findFirst({
-        where: { event: opts.event, channelId: null, isDefault: true },
+        where: { ...ownerWhere, event: opts.event, channelId: opts.channelId, isDefault: true },
+      });
+      if (row) template = toTemplate(row);
+    }
+    if (!template) {
+      const row = await this.prisma.notificationTemplate.findFirst({
+        where: { ...ownerWhere, event: opts.event, channelId: null, isDefault: true },
       });
       if (row) template = toTemplate(row);
     }
@@ -96,50 +123,79 @@ export class TemplatesService {
     };
   }
 
-  async create(dto: UpsertTemplateDto): Promise<NotificationTemplate> {
+  async create(dto: UpsertTemplateDto, userId: string): Promise<NotificationTemplate> {
     this.validateEvent(dto.event);
-    const row = await this.prisma.notificationTemplate.create({
-      data: {
-        name: dto.name.trim(),
-        event: dto.event,
-        channelId: dto.channelId ?? null,
-        body: dto.body,
-        subject: dto.subject ?? null,
-        isDefault: dto.isDefault ?? false,
-      },
-    });
+    await this.validateChannel(dto.channelId ?? null, userId);
+    const data = {
+      name: this.validateName(dto.name),
+      userId,
+      event: dto.event,
+      channelId: dto.channelId ?? null,
+      body: this.validateTemplateText(dto.body, dto.event, 'body'),
+      subject: dto.subject ? this.validateTemplateText(dto.subject, dto.event, 'subject') : null,
+      isDefault: dto.isDefault ?? false,
+    };
+    const row = data.isDefault
+      ? await this.prisma.$transaction(async (tx) => {
+          await tx.notificationTemplate.updateMany({
+            where: { userId, event: data.event, channelId: data.channelId },
+            data: { isDefault: false },
+          });
+          return tx.notificationTemplate.create({ data });
+        })
+      : await this.prisma.notificationTemplate.create({ data });
     return toTemplate(row);
   }
 
-  async update(id: string, dto: Partial<UpsertTemplateDto>): Promise<NotificationTemplate> {
+  async update(id: string, dto: Partial<UpsertTemplateDto>, userId: string): Promise<NotificationTemplate> {
     if (dto.event) this.validateEvent(dto.event);
-    const existing = await this.prisma.notificationTemplate.findUnique({ where: { id } });
+    const existing = await this.prisma.notificationTemplate.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundException(`Template ${id} not found`);
-    const row = await this.prisma.notificationTemplate.update({
-      where: { id },
-      data: {
-        name: dto.name?.trim() ?? existing.name,
-        event: dto.event ?? existing.event,
-        channelId: dto.channelId === undefined ? existing.channelId : dto.channelId,
-        body: dto.body ?? existing.body,
-        subject: dto.subject === undefined ? existing.subject : dto.subject,
-        isDefault: dto.isDefault ?? existing.isDefault,
-      },
-    });
+    const event = dto.event ?? (existing.event as NotificationEvent);
+    const channelId = dto.channelId === undefined ? existing.channelId : dto.channelId;
+    await this.validateChannel(channelId, userId);
+    const data = {
+      name: dto.name === undefined ? existing.name : this.validateName(dto.name),
+      event,
+      channelId,
+      body: dto.body === undefined ? existing.body : this.validateTemplateText(dto.body, event, 'body'),
+      subject:
+        dto.subject === undefined
+          ? existing.subject
+          : dto.subject
+            ? this.validateTemplateText(dto.subject, event, 'subject')
+            : null,
+      isDefault: dto.isDefault ?? existing.isDefault,
+    };
+    const row = data.isDefault
+      ? await this.prisma.$transaction(async (tx) => {
+          await tx.notificationTemplate.updateMany({
+            where: { userId, event: data.event, channelId: data.channelId, id: { not: id } },
+            data: { isDefault: false },
+          });
+          return tx.notificationTemplate.update({ where: { id }, data });
+        })
+      : await this.prisma.notificationTemplate.update({ where: { id }, data });
     return toTemplate(row);
   }
 
-  async remove(id: string): Promise<{ id: string }> {
-    const existing = await this.prisma.notificationTemplate.findUnique({ where: { id } });
+  async remove(id: string, userId: string): Promise<{ id: string }> {
+    const existing = await this.prisma.notificationTemplate.findFirst({ where: { id, userId } });
     if (!existing) throw new NotFoundException(`Template ${id} not found`);
     await this.prisma.notificationTemplate.delete({ where: { id } });
     return { id };
   }
 
   preview(body: string, sampleEvent: NotificationEvent = 'alert.triggered'): string {
+    this.validateEvent(sampleEvent);
+    this.validateTemplateText(body, sampleEvent, 'body');
     const ctx: TemplateContext = {
       alert: SAMPLE_ALERT,
       price: 1255,
+      symbol: SAMPLE_ALERT.symbol,
+      condition: SAMPLE_ALERT.condition,
+      target: SAMPLE_ALERT.targetPrice,
+      note: SAMPLE_ALERT.note,
       event: sampleEvent,
       timestamp: new Date().toISOString(),
     };
@@ -154,5 +210,55 @@ export class TemplatesService {
     if (!NOTIFICATION_EVENTS.includes(event as NotificationEvent)) {
       throw new BadRequestException(`Unknown event: ${event}`);
     }
+  }
+
+  private validateName(name: string): string {
+    const trimmed = String(name ?? '').trim();
+    if (!trimmed) throw new BadRequestException('Template name is required');
+    if (trimmed.length > 80) throw new BadRequestException('Template name must be 80 characters or less');
+    return trimmed;
+  }
+
+  private async validateChannel(channelId: string | null | undefined, userId: string): Promise<void> {
+    if (!channelId) return;
+    const channel = await this.prisma.notificationChannel.findFirst({ where: { id: channelId, userId } });
+    if (!channel) throw new BadRequestException(`Unknown notification channel: ${channelId}`);
+  }
+
+  private validateTemplateText(text: string, event: NotificationEvent, label: string): string {
+    const value = String(text ?? '').trim();
+    if (!value) throw new BadRequestException(`Template ${label} is required`);
+    if (value.length > MAX_TEMPLATE_LENGTH) {
+      throw new BadRequestException(`Template ${label} must be ${MAX_TEMPLATE_LENGTH} characters or less`);
+    }
+
+    const allowed = new Set(COMMON_TEMPLATE_KEYS);
+    if (event.startsWith('alert.')) {
+      for (const key of ALERT_TEMPLATE_KEYS) allowed.add(key);
+    }
+
+    const tags = Array.from(value.matchAll(/\{\{\s*(#|\/)?\s*([\w.]+)\s*\}\}/g));
+    const stripped = value.replace(/\{\{\s*(#|\/)?\s*([\w.]+)\s*\}\}/g, '');
+    if (stripped.includes('{{') || stripped.includes('}}')) {
+      throw new BadRequestException('Template tags must use {{field}} or {{#field}}{{/field}}');
+    }
+
+    const stack: string[] = [];
+    for (const match of tags) {
+      const marker = match[1];
+      const key = match[2];
+      if (!allowed.has(key)) {
+        throw new BadRequestException(`Unsupported template field: ${key}`);
+      }
+      if (marker === '#') {
+        stack.push(key);
+      } else if (marker === '/') {
+        const open = stack.pop();
+        if (open !== key) throw new BadRequestException(`Template section {{#${key}}} is not balanced`);
+      }
+    }
+    if (stack.length > 0) throw new BadRequestException(`Template section {{#${stack[stack.length - 1]}}} is not closed`);
+
+    return value;
   }
 }
