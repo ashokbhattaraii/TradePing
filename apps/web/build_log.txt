@@ -1,0 +1,20 @@
+
+> @tradeping/web@0.0.1 build /Users/ashokbhattarai/Desktop/Perosnal/StockPrice/apps/web
+> next build
+
+   ▲ Next.js 15.5.15
+
+   Creating an optimized production build ...
+ ✓ Compiled successfully in 2.3s
+   Linting and checking validity of types ...
+
+./src/components/dashboard.tsx
+715:10  Warning: 'ActivitySummary' is defined but never used.  @typescript-eslint/no-unused-vars
+
+./src/components/watchlist-panel.tsx
+43:3  Warning: 'onAlertsChange' is defined but never used.  @typescript-eslint/no-unused-vars
+626:3  Warning: 'index' is defined but never used.  @typescript-eslint/no-unused-vars
+742:35  Warning: 'isString' is defined but never used.  @typescript-eslint/no-unused-vars
+
+info  - Need to disable some ESLint rules? Learn more here: https://nextjs.org/docs/app/api-reference/config/eslint#disabling-rules
+ ELIFECYCLE  Command failed with exit code 1.

@@ -1,0 +1,105 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Alert {
+  id               String    @id
+  symbol           String
+  targetPrice      Float
+  condition        String
+  status           String    @default("ACTIVE")
+  priority         String    @default("MEDIUM")
+  note             String?
+  lastCheckedPrice Float?
+  createdAt        DateTime  @default(now())
+  triggeredAt      DateTime?
+
+  @@index([status])
+  @@index([symbol])
+}
+
+model Watchlist {
+  id            String   @id
+  name          String
+  symbols       String[]
+  symbolAddedAt Json     @default("{}")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Log {
+  id        String   @id
+  level     String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+}
+
+model Setting {
+  key   String @id
+  value String
+}
+
+model NotificationChannel {
+  id          String                 @id @default(cuid())
+  name        String
+  type        String
+  enabled     Boolean                @default(true)
+  config      Json                   @default("{}")
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+  rules       NotificationRule[]
+  templates   NotificationTemplate[]
+
+  @@index([type])
+}
+
+model NotificationTemplate {
+  id        String              @id @default(cuid())
+  name      String
+  event     String
+  channelId String?
+  channel   NotificationChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  body      String
+  subject   String?
+  isDefault Boolean             @default(false)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  rules     NotificationRule[]
+
+  @@index([event])
+  @@index([channelId])
+}
+
+model NotificationRule {
+  id            String                @id @default(cuid())
+  name          String
+  event         String
+  enabled       Boolean               @default(true)
+  priority      Int                   @default(0)
+  filters       Json                  @default("{}")
+  channelId     String
+  channel       NotificationChannel   @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  templateId    String?
+  template      NotificationTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  cooldownMin   Int                   @default(0)
+  createdAt     DateTime              @default(now())
+  updatedAt     DateTime              @updatedAt
+
+  @@index([event, enabled])
+}
+
+model PriceHistory {
+  id        String   @id @default(cuid())
+  symbol    String
+  price     Float
+  source    String
+  timestamp DateTime @default(now())
+
+  @@index([symbol, timestamp(sort: Desc)])
+}
