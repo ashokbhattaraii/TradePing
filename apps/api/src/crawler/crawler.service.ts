@@ -11,6 +11,7 @@ import { mockPrice } from './mock-prices';
 const SHARESANSAR_URL = 'https://www.sharesansar.com/today-share-price';
 const SHARESANSAR_SECTOR_URL = 'https://www.sharesansar.com/sectorwise-share-price';
 const SECTOR_CACHE_TTL_MS = 60 * 60_000;
+const DAILY_CIRCUIT_LIMIT_PCT = 15;
 
 interface PriceEntry {
   name?: string;
@@ -59,6 +60,8 @@ export interface CrawlNotice {
   url?: string;
   snippet: string;
   matchedSymbols: string[];
+  matchedTerms?: string[];
+  relevanceScore?: number;
   sentiment: 'positive' | 'neutral' | 'negative';
 }
 
@@ -83,10 +86,23 @@ export interface CrawlPredictionReport {
   steps: CrawlStep[];
   predictions: StockPrediction[];
   summary: string;
+  aiInsight?: CrawlerAiInsight;
   mode?: 'single' | 'comparison' | 'batch';
   winner?: string;
   sources: CrawlSourceConfig[];
   sourceReports: CrawlSourceReport[];
+}
+
+export interface CrawlerAiInsight {
+  provider: 'ollama';
+  model: string;
+  host: string;
+  status: 'generated' | 'skipped' | 'error';
+  summary: string;
+  keySignals: string[];
+  risks: string[];
+  actionPlan: string[];
+  error?: string;
 }
 
 export interface BrokerParticipant {
@@ -228,13 +244,148 @@ export interface CrawlSourceReport {
   id: string;
   source: string;
   url: string;
+  symbol?: string;
+  query?: string;
   status: CrawlStepStatus;
   noticesFound: number;
+  pagesDiscovered?: number;
+  pagesFetched?: number;
   bytesRead: number;
   attempts: number;
   durationMs: number;
+  matchedTerms?: string[];
   error?: string;
 }
+
+interface SymbolCrawlContext {
+  symbol: string;
+  name?: string;
+  terms: string[];
+  query: string;
+}
+
+interface CrawlTask {
+  id: string;
+  label: string;
+  source: string;
+  url: string;
+  sourceConfig: CrawlSourceConfig;
+  context: SymbolCrawlContext;
+  profile: SourceProfile;
+}
+
+interface DiscoveredCrawlPage {
+  url: string;
+  title: string;
+  seedText: string;
+  order: number;
+  seedScore: number;
+  matchedTerms: string[];
+}
+
+interface FetchTextResult {
+  text: string;
+  attempts: number;
+  bytesRead: number;
+}
+
+interface SourceProfile {
+  sourceId: string;
+  hosts: string[];
+  label: string;
+  listPaths: string[];
+  searchUrls: (context: SymbolCrawlContext) => string[];
+  acceptedPath: RegExp;
+  blockedPath?: RegExp;
+  maxDiscoveryLinks?: number;
+  maxDetailPages?: number;
+  titleFromHref?: (href: string) => string;
+}
+
+const SOURCE_PROFILES: SourceProfile[] = [
+  {
+    sourceId: 'sharesansar-announcements',
+    hosts: ['www.sharesansar.com', 'sharesansar.com'],
+    label: 'ShareSansar announcements',
+    listPaths: ['/announcement'],
+    searchUrls: (context) => [
+      `https://www.sharesansar.com/announcement?keyword=${encodeURIComponent(context.symbol)}`,
+      `https://www.sharesansar.com/announcement?keyword=${encodeURIComponent(context.query)}`,
+      'https://www.sharesansar.com/announcement',
+    ],
+    acceptedPath: /^\/(announcementdetail|newsdetail|company\/)/i,
+    maxDiscoveryLinks: 28,
+    maxDetailPages: 8,
+    titleFromHref: (href) => href.split('/').pop()?.replace(/-\d{4}-\d{2}-\d{2}$/g, '').replace(/-/g, ' ') ?? '',
+  },
+  {
+    sourceId: 'sharesansar-news',
+    hosts: ['www.sharesansar.com', 'sharesansar.com'],
+    label: 'ShareSansar latest news',
+    listPaths: ['/category/latest', '/category/analysis', '/category/right-share', '/category/bonus-share'],
+    searchUrls: () => [
+      'https://www.sharesansar.com/category/latest',
+      'https://www.sharesansar.com/category/analysis',
+      'https://www.sharesansar.com/category/right-share',
+      'https://www.sharesansar.com/category/bonus-share',
+      'https://www.sharesansar.com/category/company-analysis',
+    ],
+    acceptedPath: /^\/(newsdetail|announcementdetail|eventdetail)\//i,
+    maxDiscoveryLinks: 24,
+    maxDetailPages: 6,
+    titleFromHref: (href) => href.split('/').pop()?.replace(/-\d{4}-\d{2}-\d{2}$/g, '').replace(/-/g, ' ') ?? '',
+  },
+  {
+    sourceId: 'merolagani-news',
+    hosts: ['merolagani.com', 'www.merolagani.com'],
+    label: 'MeroLagani news',
+    listPaths: ['/NewsList.aspx'],
+    searchUrls: (context) => [
+      `https://merolagani.com/NewsList.aspx?searchText=${encodeURIComponent(context.query)}`,
+      `https://merolagani.com/CompanyDetail.aspx?symbol=${encodeURIComponent(context.symbol)}`,
+    ],
+    acceptedPath: /\/(NewsDetail|CompanyDetail)\.aspx/i,
+    maxDiscoveryLinks: 18,
+    maxDetailPages: 5,
+  },
+  {
+    sourceId: 'nepse-notices',
+    hosts: ['www.nepalstock.com.np', 'nepalstock.com.np'],
+    label: 'NEPSE notices',
+    listPaths: ['/news-and-alerts', '/corporatedisclosures', '/notices'],
+    searchUrls: (context) => [
+      `https://www.nepalstock.com.np/news-and-alerts?search=${encodeURIComponent(context.symbol)}`,
+      `https://www.nepalstock.com.np/corporatedisclosures?search=${encodeURIComponent(context.symbol)}`,
+      'https://www.nepalstock.com.np/notices',
+    ],
+    acceptedPath: /^\/(news-and-alerts|corporatedisclosures|notices|events-details|uploads|company)/i,
+    maxDiscoveryLinks: 12,
+    maxDetailPages: 3,
+  },
+  {
+    sourceId: 'nepalipaisa-news',
+    hosts: ['nepalipaisa.com', 'www.nepalipaisa.com'],
+    label: 'Nepali Paisa news',
+    listPaths: ['/News'],
+    searchUrls: (context) => [`https://nepalipaisa.com/News?search=${encodeURIComponent(context.query)}`],
+    acceptedPath: /^\/(News|Company|Announcement|Stock)/i,
+    maxDiscoveryLinks: 18,
+    maxDetailPages: 5,
+  },
+  {
+    sourceId: 'chukul-news',
+    hosts: ['chukul.com', 'www.chukul.com'],
+    label: 'Chukul news',
+    listPaths: ['/news'],
+    searchUrls: (context) => [
+      `https://chukul.com/news?search=${encodeURIComponent(context.query)}`,
+      `https://chukul.com/company/${encodeURIComponent(context.symbol)}`,
+    ],
+    acceptedPath: /^\/(news|company|stock)/i,
+    maxDiscoveryLinks: 18,
+    maxDetailPages: 5,
+  },
+];
 
 export interface CustomCrawlSource {
   label?: string;
@@ -517,63 +668,76 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     completeStep(priceStep, prices.length ? 'done' : 'warning', `${prices.length} live price rows available.`, priceStarted);
 
     const sourceConfigs = this.selectSourceConfigs(symbols[0], sourceIds, customSources);
+    const symbolContexts = this.buildSymbolCrawlContexts(symbols, prices);
+    const crawlTasks = this.buildCrawlTasks(symbolContexts, sourceConfigs);
     const sourceReports: CrawlSourceReport[] = [];
     this.logs.info(
-      `Prediction crawl started for ${symbols.join(', ') || 'no symbols'} using ${sourceConfigs.length} source${sourceConfigs.length === 1 ? '' : 's'}`,
+      `Prediction crawl started for ${symbols.join(', ') || 'no symbols'} using ${crawlTasks.length} precise source task${crawlTasks.length === 1 ? '' : 's'}`,
     );
 
     const crawled = await Promise.all(
-      sourceConfigs.map(async (source) => {
+      crawlTasks.map(async (task) => {
         const startedAt = Date.now();
         const step: CrawlStep = {
-          id: source.id,
-          label: source.label,
-          source: source.source,
-          url: source.url,
+          id: task.id,
+          label: task.label,
+          source: task.source,
+          url: task.url,
           status: 'running',
-          detail: `Scanning ${source.source} for related notices.`,
+          detail: `Searching ${task.source} for ${task.context.symbol} using ${task.context.terms.slice(0, 4).join(', ')}.`,
         };
         steps.push(step);
         try {
-          this.logs.info(`Prediction crawl source started: ${source.source} (${source.url})`);
-          const fetchResult = await this.fetchTextWithRetry(source.url, 12_000, 2);
+          this.logs.info(`Prediction crawl source started: ${task.source} ${task.context.symbol} (${task.url})`);
+          const fetchResult = await this.fetchTextWithRetry(task.url, 12_000, 2);
           const html = fetchResult.text;
-          const notices = this.extractRelatedNotices(html, source.source, source.url, symbols);
+          const deepResult = await this.crawlSourceDeep(task, html, fetchResult);
+          const notices = deepResult.notices;
+          const matchedTerms = Array.from(new Set(notices.flatMap((notice) => notice.matchedTerms ?? []))).slice(0, 12);
           completeStep(
             step,
             notices.length ? 'done' : 'warning',
             notices.length
-              ? `${notices.length} related notice${notices.length === 1 ? '' : 's'} found after ${fetchResult.attempts} attempt${fetchResult.attempts === 1 ? '' : 's'}.`
-              : `Crawled ${fetchResult.bytesRead.toLocaleString('en-US')} bytes after ${fetchResult.attempts} attempt${fetchResult.attempts === 1 ? '' : 's'}, but no symbol-specific notice was found.`,
+              ? `Deep scanned ${deepResult.pagesDiscovered} links and ${deepResult.pagesFetched} detail pages; ${notices.length} ${task.context.symbol} evidence item${notices.length === 1 ? '' : 's'} found.`
+              : `Deep scanned ${deepResult.pagesDiscovered} links and ${deepResult.pagesFetched} detail pages for ${task.context.symbol}, but no exact symbol/company evidence was found.`,
             startedAt,
           );
           sourceReports.push({
-            id: source.id,
-            source: source.source,
-            url: source.url,
+            id: task.id,
+            source: task.source,
+            url: task.url,
+            symbol: task.context.symbol,
+            query: task.context.query,
             status: notices.length ? 'done' : 'warning',
             noticesFound: notices.length,
-            bytesRead: fetchResult.bytesRead,
-            attempts: fetchResult.attempts,
+            pagesDiscovered: deepResult.pagesDiscovered,
+            pagesFetched: deepResult.pagesFetched,
+            bytesRead: deepResult.bytesRead,
+            attempts: deepResult.attempts,
             durationMs: Date.now() - startedAt,
+            matchedTerms,
           });
-          this.logs.info(`Prediction crawl source completed: ${source.source} (${notices.length} notices)`);
+          this.logs.info(`Prediction crawl source completed: ${task.source} ${task.context.symbol} (${notices.length} notices)`);
           return notices;
         } catch (err) {
           const message = (err as Error).message || 'Source crawl failed.';
           completeStep(step, 'error', `${message}. Retried and skipped this source.`, startedAt);
           sourceReports.push({
-            id: source.id,
-            source: source.source,
-            url: source.url,
+            id: task.id,
+            source: task.source,
+            url: task.url,
+            symbol: task.context.symbol,
+            query: task.context.query,
             status: 'error',
             noticesFound: 0,
+            pagesDiscovered: 0,
+            pagesFetched: 0,
             bytesRead: 0,
             attempts: 3,
             durationMs: Date.now() - startedAt,
             error: message,
           });
-          this.logs.warn(`Prediction crawl source failed after retries: ${source.source} (${message})`);
+          this.logs.warn(`Prediction crawl source failed after retries: ${task.source} ${task.context.symbol} (${message})`);
           return [] as CrawlNotice[];
         }
       }),
@@ -592,9 +756,11 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     completeStep(scoreStep, 'done', `Generated ${predictions.length} prediction${predictions.length === 1 ? '' : 's'}.`, scoreStarted);
 
     const strongest = [...predictions].sort((a, b) => b.score - a.score)[0];
-    const summary = strongest
+    const baseSummary = strongest
       ? `${strongest.symbol} has the strongest current setup (${strongest.verdict}, ${strongest.confidence}% confidence).`
       : 'No symbols were available for prediction.';
+    const aiInsight = await this.generateCrawlerAiInsight(symbols, predictions, sourceReports, notices, baseSummary);
+    const summary = aiInsight?.status === 'generated' && aiInsight.summary ? aiInsight.summary : baseSummary;
 
     this.logs.info(`Crawler prediction completed for ${symbols.join(', ') || 'no symbols'}`);
 
@@ -604,6 +770,7 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
       steps,
       predictions,
       summary,
+      aiInsight,
       mode,
       winner: strongest?.symbol,
       sources: sourceConfigs,
@@ -653,6 +820,87 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     return configs;
   }
 
+  private buildSymbolCrawlContexts(symbols: string[], prices: PriceSummary[]): SymbolCrawlContext[] {
+    const priceBySymbol = new Map(prices.map((price) => [price.symbol, price]));
+    return symbols.map((symbol) => {
+      const price = priceBySymbol.get(symbol);
+      const companyWords = (price?.name ?? '')
+        .replace(/[^\w\s]/g, ' ')
+        .split(/\s+/)
+        .filter((word) => this.isDistinctiveCompanyWord(word))
+        .slice(0, 5);
+      const terms = Array.from(
+        new Set([
+          symbol,
+          price?.name ?? '',
+          companyWords.length >= 2 ? companyWords.slice(0, 2).join(' ') : '',
+          ...companyWords,
+          `${symbol} dividend`,
+          `${symbol} bonus`,
+          `${symbol} right share`,
+          `${symbol} AGM`,
+          `${symbol} book closure`,
+          `${symbol} financial report`,
+          `${symbol} notice`,
+        ].map((term) => term.trim()).filter(Boolean)),
+      );
+      return {
+        symbol,
+        name: price?.name,
+        terms,
+        query: [symbol, ...companyWords.slice(0, 2)].join(' '),
+      };
+    });
+  }
+
+  private isDistinctiveCompanyWord(word: string): boolean {
+    const normalized = word.toLowerCase();
+    if (normalized.length < 3) return false;
+    return !/^(limited|ltd|company|co|nepal|nepali|national|agricultural|bank|bittiya|bitta|laghu|laghubitta|microfinance|finance|financial|sanstha|hydropower|hydro|power|urja|jalbidhyut|bidhyut|electric|development|bikas|bikash|commercial|insurance|reinsurance|life|capital|investment|securities|trading|traders|hotel|tourism|fund|mutual|yojana|scheme|debenture|bond|rinpatra|manufacturing|processing|industries|industry)$/i.test(
+      normalized,
+    );
+  }
+
+  private buildCrawlTasks(contexts: SymbolCrawlContext[], sources: CrawlSourceConfig[]): CrawlTask[] {
+    const tasks: CrawlTask[] = [];
+    for (const context of contexts) {
+      for (const source of sources) {
+        const profile = this.profileForSource(source);
+        for (const [index, url] of this.urlsForSourceContext(source, context, profile).entries()) {
+          tasks.push({
+            id: `${source.id}-${context.symbol}-${index + 1}`.replace(/[^a-zA-Z0-9-_]/g, '-'),
+            label: `${profile.label}: ${context.symbol}${index ? ` route ${index + 1}` : ''}`,
+            source: source.source,
+            url,
+            sourceConfig: source,
+            context,
+            profile,
+          });
+        }
+      }
+    }
+    return tasks.slice(0, 60);
+  }
+
+  private urlsForSourceContext(source: CrawlSourceConfig, context: SymbolCrawlContext, profile: SourceProfile): string[] {
+    if (source.custom) return [source.url];
+    return Array.from(new Set([...profile.searchUrls(context), source.url])).slice(0, 4);
+  }
+
+  private profileForSource(source: CrawlSourceConfig): SourceProfile {
+    const host = this.safeUrl(source.url)?.hostname;
+    return SOURCE_PROFILES.find((profile) => profile.sourceId === source.id) ?? {
+      sourceId: source.id,
+      hosts: host ? [host] : [],
+      label: source.label,
+      listPaths: [],
+      searchUrls: () => [source.url],
+      acceptedPath: /^\/(?!.*\.(?:png|jpe?g|gif|webp|svg|ico|css|js|woff2?|ttf|zip|rar|mp4|mp3)$).*/i,
+      maxDiscoveryLinks: 14,
+      maxDetailPages: 4,
+    };
+  }
+
   private stockSourceConfigs(symbol?: string): CrawlSourceConfig[] {
     const query = encodeURIComponent(symbol ?? 'nepse');
     return [
@@ -660,7 +908,7 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
         id: 'sharesansar-announcements',
         label: 'Crawl ShareSansar announcements',
         source: 'ShareSansar',
-        url: 'https://www.sharesansar.com/category/announcement',
+        url: 'https://www.sharesansar.com/announcement',
       },
       {
         id: 'sharesansar-news',
@@ -699,14 +947,17 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     url: string,
     timeoutMs: number,
     retries: number,
-  ): Promise<{ text: string; attempts: number; bytesRead: number }> {
+  ): Promise<FetchTextResult> {
     let lastErr: Error = new Error('No fetch attempt made');
     for (let attempt = 1; attempt <= retries + 1; attempt++) {
       try {
         const res = await fetch(url, {
           headers: {
             'User-Agent': this.crawlerUserAgent,
-            Accept: 'text/html,application/xhtml+xml,text/plain',
+            Accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            Referer: this.originForUrl(url),
           },
           signal: AbortSignal.timeout(timeoutMs),
         });
@@ -724,48 +975,510 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     throw lastErr;
   }
 
-  private extractRelatedNotices(html: string, source: string, baseUrl: string, symbols: string[]): CrawlNotice[] {
+  private async crawlSourceDeep(
+    task: CrawlTask,
+    listHtml: string,
+    listFetch: FetchTextResult,
+  ): Promise<{ notices: CrawlNotice[]; pagesDiscovered: number; pagesFetched: number; bytesRead: number; attempts: number }> {
+    const contexts = [task.context];
+    const seedNotices = this.extractRelatedNotices(listHtml, task.source, task.url, contexts, task.profile);
+    const candidates = this.discoverCandidatePages(listHtml, task.url, contexts, task.profile);
+    const selectedPages = this.selectDetailPages(candidates, task.profile);
+    const detailNotices: CrawlNotice[] = [];
+    let detailBytes = 0;
+    let detailAttempts = 0;
+    let pagesFetched = 0;
+
+    for (const page of selectedPages) {
+      try {
+        const detail = await this.fetchTextWithRetry(page.url, 9_000, 1);
+        pagesFetched += 1;
+        detailBytes += detail.bytesRead;
+        detailAttempts += detail.attempts;
+        const notice = this.extractDetailNotice(detail.text, page, task.source, contexts, task.profile);
+        if (notice) detailNotices.push(notice);
+      } catch (err) {
+        detailAttempts += 2;
+        this.logs.warn(`Prediction detail crawl skipped: ${task.source} ${task.context.symbol} ${page.url} (${(err as Error).message})`);
+      }
+    }
+
+    return {
+      notices: this.dedupeNotices([...detailNotices, ...seedNotices]).slice(0, 32),
+      pagesDiscovered: candidates.length,
+      pagesFetched,
+      bytesRead: listFetch.bytesRead + detailBytes,
+      attempts: listFetch.attempts + detailAttempts,
+    };
+  }
+
+  private extractRelatedNotices(
+    html: string,
+    source: string,
+    baseUrl: string,
+    contexts: SymbolCrawlContext[],
+    profile: SourceProfile,
+  ): CrawlNotice[] {
     const notices: CrawlNotice[] = [];
     const seen = new Set<string>();
     const anchorRx = /<a\b[^>]*href=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
     let match: RegExpExecArray | null;
 
-    while ((match = anchorRx.exec(html)) !== null && notices.length < 32) {
+    while ((match = anchorRx.exec(html)) !== null && notices.length < 48) {
       const title = this.htmlText(match[2]).replace(/\s+/g, ' ').trim();
       if (title.length < 12 || title.length > 220) continue;
 
-      const upper = title.toUpperCase();
-      const matchedSymbols = symbols.filter((symbol) => new RegExp(`(^|[^A-Z0-9])${symbol}([^A-Z0-9]|$)`).test(upper));
-      const marketRelated =
-        matchedSymbols.length > 0 ||
-        /\b(dividend|bonus|right share|auction|book closure|agm|earning|profit|loss|merger|listed|notice|ipo|fpo|financial|quarter)\b/i.test(
-          title,
-        );
-      if (!marketRelated) continue;
+      const href = match[1] ?? '';
+      const url = this.resolveSourceUrl(href, baseUrl);
+      if (!this.profileAcceptsUrl(profile, url)) continue;
+
+      const inferredTitle = profile.titleFromHref?.(href) ?? '';
+      const text = `${title} ${inferredTitle} ${href}`.replace(/[-_/]+/g, ' ');
+      const related = this.matchNoticeContexts(text, contexts);
+      const sourceWeightedScore = related.relevanceScore + this.sourceStructureScore(profile, url);
+      if (related.matchedSymbols.length === 0 || sourceWeightedScore < 18) continue;
 
       const key = `${source}:${title.toLowerCase()}`;
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const href = match[1] ?? '';
-      let url: string | undefined;
-      try {
-        url = new URL(href, baseUrl).toString();
-      } catch {
-        url = undefined;
-      }
-
       notices.push({
         source,
         title,
         url,
-        snippet: title,
-        matchedSymbols,
+        snippet: this.buildSnippet(text, related.matchedTerms),
+        matchedSymbols: related.matchedSymbols,
+        matchedTerms: related.matchedTerms,
+        relevanceScore: Math.min(100, sourceWeightedScore),
         sentiment: this.classifyNoticeSentiment(title),
       });
     }
 
-    return notices;
+    return notices.sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0)).slice(0, 32);
+  }
+
+  private discoverCandidatePages(
+    html: string,
+    baseUrl: string,
+    contexts: SymbolCrawlContext[],
+    profile: SourceProfile,
+  ): DiscoveredCrawlPage[] {
+    const candidates: DiscoveredCrawlPage[] = [];
+    const seen = new Set<string>();
+    const anchorRx = /<a\b[^>]*href=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
+    let match: RegExpExecArray | null;
+    let order = 0;
+
+    while ((match = anchorRx.exec(html)) !== null) {
+      const href = match[1] ?? '';
+      const url = this.resolveSourceUrl(href, baseUrl);
+      if (!this.profileAcceptsUrl(profile, url)) continue;
+
+      const title = this.htmlText(match[2]).replace(/\s+/g, ' ').trim() || profile.titleFromHref?.(href) || '';
+      const inferredTitle = profile.titleFromHref?.(href) ?? '';
+      const nearbyHtml = html.slice(Math.max(0, match.index - 700), Math.min(html.length, anchorRx.lastIndex + 700));
+      const seedText = `${title} ${inferredTitle} ${href} ${this.htmlText(nearbyHtml)}`.replace(/[-_/]+/g, ' ');
+      const related = this.matchNoticeContexts(seedText, contexts);
+      const seedScore = related.relevanceScore + this.sourceStructureScore(profile, url);
+      const key = this.canonicalUrlKey(url);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      candidates.push({
+        url: url!,
+        title: title || inferredTitle || new URL(url!).pathname,
+        seedText,
+        order: order++,
+        seedScore,
+        matchedTerms: related.matchedTerms,
+      });
+    }
+
+    return candidates
+      .sort((a, b) => b.seedScore - a.seedScore || a.order - b.order)
+      .slice(0, profile.maxDiscoveryLinks ?? 18);
+  }
+
+  private selectDetailPages(candidates: DiscoveredCrawlPage[], profile: SourceProfile): DiscoveredCrawlPage[] {
+    const limit = profile.maxDetailPages ?? 5;
+    const strong = candidates.filter((candidate) => candidate.seedScore >= 18);
+    const fallback = candidates.filter((candidate) => candidate.seedScore < 18).slice(0, Math.max(2, limit - strong.length));
+    return [...strong, ...fallback].slice(0, limit);
+  }
+
+  private extractDetailNotice(
+    html: string,
+    page: DiscoveredCrawlPage,
+    source: string,
+    contexts: SymbolCrawlContext[],
+    profile: SourceProfile,
+  ): CrawlNotice | null {
+    const content = this.extractReadablePageContent(html);
+    const title = content.title || page.title;
+    const text = `${title} ${content.description} ${content.body} ${page.seedText}`.replace(/\s+/g, ' ').trim();
+    const related = this.matchNoticeContexts(text, contexts);
+    const sourceWeightedScore = related.relevanceScore + this.sourceStructureScore(profile, page.url) + (page.seedScore >= 18 ? 8 : 0);
+    if (related.matchedSymbols.length === 0 || sourceWeightedScore < 24) return null;
+
+    return {
+      source,
+      title: title.slice(0, 220),
+      url: page.url,
+      snippet: this.buildSnippet(text, related.matchedTerms),
+      matchedSymbols: related.matchedSymbols,
+      matchedTerms: related.matchedTerms,
+      relevanceScore: Math.min(100, sourceWeightedScore),
+      sentiment: this.classifyNoticeSentiment(text),
+    };
+  }
+
+  private extractReadablePageContent(html: string): { title: string; description: string; body: string } {
+    const withoutScripts = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+    const title = this.htmlText(this.firstHtmlMatch(withoutScripts, /<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["'][^>]*>/i))
+      || this.htmlText(this.firstHtmlMatch(withoutScripts, /<title[^>]*>([\s\S]*?)<\/title>/i))
+      || this.htmlText(this.firstHtmlMatch(withoutScripts, /<h1[^>]*>([\s\S]*?)<\/h1>/i));
+    const description = this.htmlText(
+      this.firstHtmlMatch(withoutScripts, /<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["'][^>]*>/i)
+        || this.firstHtmlMatch(withoutScripts, /<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["'][^>]*>/i),
+    );
+    const blocks = Array.from(withoutScripts.matchAll(/<(h1|h2|h3|p|li|td|th|span|div)\b[^>]*>([\s\S]*?)<\/\1>/gi))
+      .map((match) => this.htmlText(match[2]))
+      .filter((text) => text.length >= 18 && text.length <= 900 && !/^(login|register|home|news|search|clear|previous|next)$/i.test(text));
+    return {
+      title,
+      description,
+      body: Array.from(new Set(blocks)).slice(0, 140).join(' '),
+    };
+  }
+
+  private firstHtmlMatch(value: string, rx: RegExp): string | undefined {
+    return rx.exec(value)?.[1];
+  }
+
+  private dedupeNotices(notices: CrawlNotice[]): CrawlNotice[] {
+    const seen = new Set<string>();
+    const result: CrawlNotice[] = [];
+    for (const notice of notices.sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0))) {
+      const key = `${notice.source}:${notice.url ?? notice.title}`.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(notice);
+    }
+    return result;
+  }
+
+  private async generateCrawlerAiInsight(
+    symbols: string[],
+    predictions: StockPrediction[],
+    sourceReports: CrawlSourceReport[],
+    notices: CrawlNotice[],
+    fallbackSummary: string,
+  ): Promise<CrawlerAiInsight | undefined> {
+    const enabled = this.config.get<string>('OLLAMA_AI_ENABLED') !== 'false';
+    const apiKey = this.config.get<string>('OLLAMA_API_KEY')?.trim();
+    const host = (this.config.get<string>('OLLAMA_HOST')?.trim() || 'https://ollama.com').replace(/\/+$/, '');
+    const model = this.config.get<string>('OLLAMA_MODEL')?.trim() || 'minimax-m2.5:cloud';
+
+    if (!enabled) return this.buildSkippedAiInsight(model, host, 'Ollama AI insight is disabled.');
+    if (host.includes('ollama.com') && !apiKey) {
+      return this.buildSkippedAiInsight(model, host, 'Set OLLAMA_API_KEY to use Ollama Cloud after deployment.');
+    }
+
+    const system = [
+      'You are a cautious NEPSE stock analysis assistant inside TradePing.',
+      'Use only the supplied crawler evidence, price data, notices, and diagnostics.',
+      'Do not guarantee profit, accuracy, or future price movement.',
+      'Return valid compact JSON only with keys: summary, keySignals, risks, actionPlan.',
+    ].join(' ');
+    const user = JSON.stringify({
+      task: 'Create an evidence-based crawler insight. Mention source weakness when coverage is limited.',
+      symbols,
+      predictions: predictions.map((prediction) => ({
+        symbol: prediction.symbol,
+        name: prediction.name,
+        verdict: prediction.verdict,
+        confidence: prediction.confidence,
+        score: prediction.score,
+        price: prediction.price,
+        changePct: prediction.changePct,
+        sector: prediction.sector,
+        reasons: prediction.reasons,
+        notices: prediction.notices.slice(0, 5).map((notice) => ({
+          source: notice.source,
+          title: notice.title,
+          sentiment: notice.sentiment,
+          relevanceScore: notice.relevanceScore,
+          matchedTerms: notice.matchedTerms,
+          url: notice.url,
+        })),
+      })),
+      sourceReports: sourceReports.slice(0, 24).map((source) => ({
+        source: source.source,
+        symbol: source.symbol,
+        status: source.status,
+        noticesFound: source.noticesFound,
+        pagesDiscovered: source.pagesDiscovered,
+        pagesFetched: source.pagesFetched,
+        matchedTerms: source.matchedTerms,
+        error: source.error,
+      })),
+      noticeCount: notices.length,
+      fallbackSummary,
+    });
+
+    let lastError = '';
+    for (const candidate of this.ollamaModelCandidates(model, host)) {
+      try {
+        const content = await this.callOllamaChat(host, candidate, apiKey, system, user);
+        const parsed = this.parseCrawlerAiResponse(content);
+        this.logs.info(`Ollama crawler insight generated with ${candidate}`);
+        return {
+          provider: 'ollama',
+          model: candidate,
+          host,
+          status: 'generated',
+          ...parsed,
+        };
+      } catch (err) {
+        lastError = (err as Error).message || 'Ollama request failed.';
+        this.logs.warn(`Ollama crawler insight failed with ${candidate}: ${lastError}`);
+      }
+    }
+
+    return {
+      provider: 'ollama',
+      model,
+      host,
+      status: 'error',
+      summary: fallbackSummary,
+      keySignals: [],
+      risks: [],
+      actionPlan: [],
+      error: lastError,
+    };
+  }
+
+  private buildSkippedAiInsight(model: string, host: string, reason: string): CrawlerAiInsight {
+    return {
+      provider: 'ollama',
+      model,
+      host,
+      status: 'skipped',
+      summary: reason,
+      keySignals: [],
+      risks: [],
+      actionPlan: [],
+    };
+  }
+
+  private ollamaModelCandidates(model: string, host: string): string[] {
+    const fallbackModels = ['minimax-m2.5:cloud', 'gpt-oss:20b-cloud'];
+    const candidates = [model, ...fallbackModels];
+    if (host.includes('ollama.com')) {
+      for (const candidate of [...candidates]) {
+        if (candidate.endsWith(':cloud')) candidates.push(candidate.replace(/:cloud$/, ''));
+      }
+    }
+    return Array.from(new Set(candidates));
+  }
+
+  private async callOllamaChat(
+    host: string,
+    model: string,
+    apiKey: string | undefined,
+    system: string,
+    user: string,
+  ): Promise<string> {
+    const response = await fetch(this.ollamaApiUrl(host, 'chat'), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        format: 'json',
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: user },
+        ],
+        options: {
+          temperature: 0.2,
+          num_predict: 700,
+        },
+      }),
+      signal: AbortSignal.timeout(35_000),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`Ollama ${response.status}: ${text.slice(0, 180) || response.statusText}`);
+    }
+    const data = (await response.json()) as { message?: { content?: string }; response?: string };
+    const content = data.message?.content ?? data.response ?? '';
+    if (!content.trim()) throw new Error('Ollama returned an empty response.');
+    return content;
+  }
+
+  private ollamaApiUrl(host: string, endpoint: 'chat'): string {
+    return `${host.replace(/\/api$/, '')}/api/${endpoint}`;
+  }
+
+  private parseCrawlerAiResponse(content: string): Pick<CrawlerAiInsight, 'summary' | 'keySignals' | 'risks' | 'actionPlan'> {
+    const parsed = JSON.parse(this.extractJsonObject(content)) as {
+      summary?: unknown;
+      keySignals?: unknown;
+      risks?: unknown;
+      actionPlan?: unknown;
+    };
+    return {
+      summary: this.cleanAiText(parsed.summary, 360) || 'AI insight generated from crawler evidence.',
+      keySignals: this.cleanAiList(parsed.keySignals, 5),
+      risks: this.cleanAiList(parsed.risks, 5),
+      actionPlan: this.cleanAiList(parsed.actionPlan, 5),
+    };
+  }
+
+  private extractJsonObject(value: string): string {
+    const start = value.indexOf('{');
+    const end = value.lastIndexOf('}');
+    if (start >= 0 && end > start) return value.slice(start, end + 1);
+    return value;
+  }
+
+  private cleanAiList(value: unknown, limit: number): string[] {
+    if (!Array.isArray(value)) return [];
+    return value
+      .map((item) => this.cleanAiText(item, 180))
+      .filter(Boolean)
+      .slice(0, limit);
+  }
+
+  private cleanAiText(value: unknown, limit: number): string {
+    return String(value ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, limit);
+  }
+
+  private resolveSourceUrl(href: string, baseUrl: string): string | undefined {
+    try {
+      return new URL(href, baseUrl).toString();
+    } catch {
+      return undefined;
+    }
+  }
+
+  private profileAcceptsUrl(profile: SourceProfile, url?: string): boolean {
+    if (!url) return false;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+      if (profile.hosts.length && !profile.hosts.includes(parsed.hostname)) return false;
+      if (/\.(?:png|jpe?g|gif|webp|svg|ico|css|js|woff2?|ttf|zip|rar|mp4|mp3)(?:$|\?)/i.test(parsed.pathname)) return false;
+      if (profile.blockedPath?.test(parsed.pathname)) return false;
+      return profile.acceptedPath.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  private safeUrl(url: string): URL | null {
+    try {
+      return new URL(url);
+    } catch {
+      return null;
+    }
+  }
+
+  private canonicalUrlKey(url: string | undefined): string {
+    if (!url) return '';
+    try {
+      const parsed = new URL(url);
+      parsed.hash = '';
+      return parsed.toString().replace(/\/$/, '');
+    } catch {
+      return url;
+    }
+  }
+
+  private originForUrl(url: string): string {
+    return this.safeUrl(url)?.origin ?? SHARESANSAR_URL;
+  }
+
+  private sourceStructureScore(profile: SourceProfile, url?: string): number {
+    if (!url) return 0;
+    try {
+      const path = new URL(url).pathname;
+      if (profile.acceptedPath.test(path)) return 10;
+      if (profile.listPaths.some((item) => path.startsWith(item))) return 4;
+    } catch {
+      return 0;
+    }
+    return 0;
+  }
+
+  private matchNoticeContexts(text: string, contexts: SymbolCrawlContext[]): {
+    matchedSymbols: string[];
+    matchedTerms: string[];
+    relevanceScore: number;
+  } {
+    const haystack = text.toLowerCase();
+    const matchedSymbols: string[] = [];
+    const matchedTerms = new Set<string>();
+    let relevanceScore = 0;
+
+    for (const context of contexts) {
+      const symbolRx = new RegExp(`(^|[^a-z0-9])${context.symbol.toLowerCase()}([^a-z0-9]|$)`, 'i');
+      if (symbolRx.test(text)) {
+        matchedSymbols.push(context.symbol);
+        matchedTerms.add(context.symbol);
+        relevanceScore += 35;
+      }
+
+      if (context.name && haystack.includes(context.name.toLowerCase())) {
+        matchedSymbols.push(context.symbol);
+        matchedTerms.add(context.name);
+        relevanceScore += 30;
+      }
+
+      for (const term of context.terms) {
+        if (term === context.symbol || term === context.name) continue;
+        const normalized = term.toLowerCase();
+        if (normalized.length >= 4 && haystack.includes(normalized)) {
+          matchedTerms.add(term);
+          if (term.includes(' ') || normalized.includes(context.symbol.toLowerCase())) {
+            matchedSymbols.push(context.symbol);
+            relevanceScore += 14;
+          } else {
+            relevanceScore += 4;
+          }
+        }
+      }
+    }
+
+    if (/\b(dividend|bonus|right share|auction|book closure|agm|earning|profit|loss|merger|listed|notice|financial|quarter|cash dividend)\b/i.test(text)) {
+      relevanceScore += 12;
+    }
+
+    return {
+      matchedSymbols: Array.from(new Set(matchedSymbols)),
+      matchedTerms: Array.from(matchedTerms).slice(0, 12),
+      relevanceScore: Math.min(100, relevanceScore),
+    };
+  }
+
+  private buildSnippet(text: string, terms: string[]): string {
+    const clean = text.replace(/\s+/g, ' ').trim();
+    const firstTerm = terms.find((term) => term.length >= 3);
+    if (!firstTerm) return clean.slice(0, 220);
+    const index = clean.toLowerCase().indexOf(firstTerm.toLowerCase());
+    if (index < 0) return clean.slice(0, 220);
+    const start = Math.max(0, index - 70);
+    const end = Math.min(clean.length, index + firstTerm.length + 140);
+    return `${start > 0 ? '…' : ''}${clean.slice(start, end)}${end < clean.length ? '…' : ''}`;
   }
 
   private classifyNoticeSentiment(text: string): CrawlNotice['sentiment'] {
@@ -782,7 +1495,8 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
   private predictSymbol(symbol: string, prices: PriceSummary[], notices: CrawlNotice[]): StockPrediction {
     const price = prices.find((item) => item.symbol === symbol);
     const relatedNotices = notices
-      .filter((notice) => notice.matchedSymbols.includes(symbol) || notice.matchedSymbols.length === 0)
+      .filter((notice) => notice.matchedSymbols.includes(symbol))
+      .sort((a, b) => (b.relevanceScore ?? 0) - (a.relevanceScore ?? 0))
       .slice(0, 6);
     const sentimentScore = relatedNotices.reduce((sum, notice) => {
       if (notice.sentiment === 'positive') return sum + 10;
@@ -793,14 +1507,15 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     const liquidityScore = price?.volume ? Math.min(15, Math.log10(Math.max(price.volume, 1)) * 3) : 0;
     const score = Math.round(Math.max(-100, Math.min(100, momentumScore + sentimentScore + liquidityScore)));
     const sourceCount = new Set(relatedNotices.map((notice) => notice.source)).size;
-    const confidence = Math.round(Math.max(35, Math.min(92, 45 + sourceCount * 10 + relatedNotices.length * 3 + (price ? 12 : 0))));
+    const relevanceBoost = Math.min(18, relatedNotices.reduce((sum, notice) => sum + (notice.relevanceScore ?? 0), 0) / 18);
+    const confidence = Math.round(Math.max(35, Math.min(95, 42 + sourceCount * 10 + relatedNotices.length * 3 + relevanceBoost + (price ? 12 : 0))));
     const verdict: StockPrediction['verdict'] =
       score >= 35 ? 'BULLISH' : score >= 12 ? 'WATCH' : score <= -18 ? 'RISK' : 'NEUTRAL';
     const reasons = [
       price ? `${price.changePct >= 0 ? 'Positive' : 'Negative'} intraday move of ${price.changePct.toFixed(2)}%.` : 'No live price row found in the crawler cache.',
       relatedNotices.length
-        ? `${relatedNotices.length} related market notice${relatedNotices.length === 1 ? '' : 's'} influenced the score.`
-        : 'No symbol-specific notice was found across crawled sources.',
+        ? `${relatedNotices.length} precise token/company match${relatedNotices.length === 1 ? '' : 'es'} influenced the score.`
+        : 'No precise token/company match was found across crawled sources.',
       price?.volume ? `Volume read: ${Math.round(price.volume).toLocaleString('en-US')}.` : 'Volume signal unavailable.',
     ];
 
@@ -1090,8 +1805,8 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
         alertIdeas: [],
       };
     }
-    const upper = Math.round(price.price * 1.02 * 10) / 10;
-    const lower = Math.round(price.price * 0.98 * 10) / 10;
+    const upper = this.clampAlertTarget(price.price, Math.round(price.price * 1.02 * 10) / 10);
+    const lower = this.clampAlertTarget(price.price, Math.round(price.price * 0.98 * 10) / 10);
     const stance: StockCommandReport['suggestedPlan']['stance'] =
       risk.level === 'HIGH' || risk.level === 'EXTREME'
         ? 'AVOID'
@@ -1285,8 +2000,8 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     if (!price) return [];
     const normalLossPct = downsideScenarios[0]?.lossPct ?? 2;
     const stopPct = Math.max(2, Math.min(8, normalLossPct));
-    const breakout = Math.round(price.price * 1.025 * 10) / 10;
-    const fail = Math.round(price.price * (1 - stopPct / 100) * 10) / 10;
+    const breakout = this.clampAlertTarget(price.price, Math.round(price.price * 1.025 * 10) / 10);
+    const fail = this.clampAlertTarget(price.price, Math.round(price.price * (1 - stopPct / 100) * 10) / 10);
     return [
       { condition: 'ABOVE', targetPrice: breakout, reason: 'Only enter stronger if price confirms above the current range.' },
       { condition: 'BELOW', targetPrice: fail, reason: `Exit warning around estimated normal pullback risk (${stopPct.toFixed(1)}%).` },
@@ -1296,6 +2011,12 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
   private num(value: string | undefined): number {
     const parsed = parseFloat((value ?? '').replace(/,/g, ''));
     return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  private clampAlertTarget(referencePrice: number, targetPrice: number): number {
+    const lower = referencePrice * (1 - DAILY_CIRCUIT_LIMIT_PCT / 100);
+    const upper = referencePrice * (1 + DAILY_CIRCUIT_LIMIT_PCT / 100);
+    return Math.round(Math.min(upper, Math.max(lower, targetPrice)) * 10) / 10;
   }
 
   private async persistSnapshot() {

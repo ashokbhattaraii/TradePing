@@ -443,13 +443,13 @@ export function CrawlerPredictionPanel({ symbols, stocks = [] }: { symbols: stri
                 return (
                   <div
                     key={source.id}
-	                    className={cn(
-	                      'flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors',
-	                      checked
-	                        ? 'border-emerald-400/25 bg-emerald-400/10'
-	                        : 'border-white/10 bg-white/[0.03] hover:border-white/20',
-	                    )}
-	                  >
+                    className={cn(
+                      'flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors',
+                      checked
+                        ? 'border-emerald-400/25 bg-emerald-400/10'
+                        : 'border-white/10 bg-white/[0.03] hover:border-white/20',
+                    )}
+                  >
                     <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-3">
                       <input
                         type="checkbox"
@@ -495,7 +495,7 @@ export function CrawlerPredictionPanel({ symbols, stocks = [] }: { symbols: stri
             <div>
               <h3 className="text-sm font-semibold text-white">Crawl Steps</h3>
               <p className="text-xs text-white/40">
-                {selectedSources.map((source) => source.source).join(' -> ') || 'No source selected'}
+                {activeSymbols.length || 1} token scan x source-aware routes
               </p>
             </div>
             {running && <Loader2 className="h-4 w-4 animate-spin text-emerald-300" aria-hidden="true" />}
@@ -525,7 +525,14 @@ export function CrawlerPredictionPanel({ symbols, stocks = [] }: { symbols: stri
                   </div>
                   <p className="mt-1 text-sm text-white/60">{report.summary}</p>
                 </div>
-                <Badge tone="success">{new Date(report.generatedAt).toLocaleTimeString()}</Badge>
+                <div className="flex flex-wrap items-center gap-2">
+                  {report.aiInsight && (
+                    <Badge tone={report.aiInsight.status === 'generated' ? 'success' : report.aiInsight.status === 'error' ? 'danger' : 'default'}>
+                      Ollama {report.aiInsight.status}
+                    </Badge>
+                  )}
+                  <Badge tone="success">{new Date(report.generatedAt).toLocaleTimeString()}</Badge>
+                </div>
               </div>
             </Card>
 
@@ -662,13 +669,21 @@ export function CrawlerPredictionPanel({ symbols, stocks = [] }: { symbols: stri
                               className="rounded-lg border border-white/10 bg-black/15 p-3 transition-colors hover:border-white/20 hover:bg-white/[0.05]"
                             >
                               <div className="mb-1 flex items-center justify-between gap-3">
-                                <Badge tone={sentimentTone[notice.sentiment]}>{notice.sentiment}</Badge>
+                                <span className="flex flex-wrap items-center gap-1.5">
+                                  <Badge tone={sentimentTone[notice.sentiment]}>{notice.sentiment}</Badge>
+                                  {notice.relevanceScore !== undefined && <Badge tone="info">{notice.relevanceScore}% match</Badge>}
+                                </span>
                                 <span className="flex items-center gap-1 text-[11px] text-white/35">
                                   {notice.source}
                                   <ExternalLink className="h-3 w-3" aria-hidden="true" />
                                 </span>
                               </div>
                               <p className="line-clamp-2 text-sm text-white/70">{notice.title}</p>
+                              {notice.matchedTerms?.length ? (
+                                <p className="mt-2 line-clamp-1 text-[11px] text-white/35">
+                                  Matched: {notice.matchedTerms.slice(0, 5).join(', ')}
+                                </p>
+                              ) : null}
                             </a>
                           ))
                         )}
@@ -751,7 +766,7 @@ function PredictionDeepDive({ report }: { report: CrawlPredictionReport }) {
             Detailed Prediction Page
           </div>
           <p className="mt-1 text-xs text-white/45">
-            Evidence coverage, retry diagnostics, source volume, and confidence breakdown.
+            Deep page discovery, detail fetches, direct source links, retry diagnostics, matched terms, and confidence breakdown.
           </p>
         </div>
         <Badge tone={failed ? 'warn' : 'success'}>
@@ -765,6 +780,29 @@ function PredictionDeepDive({ report }: { report: CrawlPredictionReport }) {
         <MetricTile label="Avg Confidence" value={`${avgConfidence}%`} />
         <MetricTile label="Bytes Crawled" value={totalBytes.toLocaleString('en-US')} />
       </div>
+
+      {report.aiInsight && (
+        <div className="mt-5 rounded-lg border border-white/10 bg-black/15 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-white">
+              <Sparkles className="h-4 w-4 text-emerald-300" aria-hidden="true" />
+              Ollama Cloud Insight
+            </div>
+            <Badge tone={report.aiInsight.status === 'generated' ? 'success' : report.aiInsight.status === 'error' ? 'danger' : 'default'}>
+              {report.aiInsight.model}
+            </Badge>
+          </div>
+          <p className="mt-2 text-sm leading-6 text-white/65">{report.aiInsight.summary}</p>
+          {report.aiInsight.error && <p className="mt-2 text-xs text-red-200/80">{report.aiInsight.error}</p>}
+          {report.aiInsight.status === 'generated' && (
+            <div className="mt-4 grid gap-3 lg:grid-cols-3">
+              <AiInsightList title="Key Signals" items={report.aiInsight.keySignals} />
+              <AiInsightList title="Risks" items={report.aiInsight.risks} />
+              <AiInsightList title="Action Plan" items={report.aiInsight.actionPlan} />
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="mt-5 grid gap-3">
         <div className="flex items-center justify-between gap-3">
@@ -780,26 +818,38 @@ function PredictionDeepDive({ report }: { report: CrawlPredictionReport }) {
             sourceReports.map((source) => (
               <div
                 key={`${source.id}-${source.url}`}
-                className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.03] p-3 lg:grid-cols-[minmax(0,1fr)_120px_120px_100px]"
+                className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.03] p-3 lg:grid-cols-[minmax(0,1fr)_120px_120px_120px_100px]"
               >
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge tone={source.status === 'error' ? 'danger' : source.status === 'warning' ? 'warn' : 'success'}>
                       {source.status}
                     </Badge>
+                    {source.symbol && <Badge tone="info">{source.symbol}</Badge>}
                     <span className="font-medium text-white">{source.source}</span>
                   </div>
                   <a
                     href={source.url}
                     target="_blank"
                     rel="noreferrer"
-                    className="mt-1 block truncate text-xs text-white/40 transition-colors hover:text-white/70"
+                    className="mt-1 flex min-w-0 items-center gap-1 truncate text-xs text-white/40 transition-colors hover:text-white/70"
                   >
-                    {source.url}
+                    <span className="truncate">{source.url}</span>
+                    <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
                   </a>
+                  {source.query && <p className="mt-1 truncate text-xs text-white/35">Token route: {source.query}</p>}
+                  {source.matchedTerms?.length ? (
+                    <p className="mt-1 line-clamp-1 text-xs text-emerald-200/65">
+                      Matched: {source.matchedTerms.slice(0, 6).join(', ')}
+                    </p>
+                  ) : null}
                   {source.error && <p className="mt-1 text-xs text-red-200/80">{source.error}</p>}
                 </div>
                 <DiagnosticStat label="Attempts" value={source.attempts} />
+                <DiagnosticStat
+                  label="Pages"
+                  value={`${source.pagesDiscovered ?? 0}/${source.pagesFetched ?? 0}`}
+                />
                 <DiagnosticStat label="Notices" value={source.noticesFound} />
                 <DiagnosticStat label="Time" value={`${source.durationMs}ms`} />
               </div>
@@ -849,6 +899,26 @@ function MetricTile({ label, value }: { label: string; value: string | number })
   );
 }
 
+function AiInsightList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-white/45">{title}</h4>
+      <div className="mt-2 grid gap-2 text-sm text-white/65">
+        {items.length === 0 ? (
+          <p className="text-white/35">No items returned.</p>
+        ) : (
+          items.map((item) => (
+            <div key={`${title}-${item}`} className="flex gap-2">
+              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-300" aria-hidden="true" />
+              <span>{item}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DiagnosticStat({ label, value }: { label: string; value: string | number }) {
   return (
     <div className="rounded-lg bg-white/[0.03] px-3 py-2">
@@ -885,6 +955,17 @@ function StepRow({ step, index }: { step: CrawlPredictionStep; index: number }) 
           {step.source && <Badge tone="default">{step.source}</Badge>}
         </div>
         <p className="mt-1 text-xs leading-5 text-white/45">{step.detail}</p>
+        {step.url && (
+          <a
+            href={step.url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-1 inline-flex max-w-full items-center gap-1 truncate text-[11px] text-blue-300/70 transition-colors hover:text-blue-200"
+          >
+            <span className="truncate">Go to source</span>
+            <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+          </a>
+        )}
         {step.durationMs !== undefined && (
           <p className="mt-1 font-mono text-[11px] text-white/30">{step.durationMs}ms</p>
         )}

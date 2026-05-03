@@ -62,6 +62,25 @@ export interface SystemSettings {
   signalDipRangePct: number;
   /** Auto-watch symbols with an edge score at or above this value. 0 = off */
   signalAutoWatchScore: number;
+  // ── Portfolio Bot ────────────────────────────────────────────────────────
+  /** Enable automatic portfolio analysis for manually entered holdings */
+  portfolioBotEnabled: boolean;
+  /** Minutes between automatic portfolio analysis runs */
+  portfolioBotIntervalMinutes: number;
+  /** Send portfolio bot summaries to Slack when a webhook is configured */
+  portfolioBotSlackEnabled: boolean;
+  /** Minimum minutes between repeated portfolio bot Slack summaries */
+  portfolioBotSlackRepeatMinutes: number;
+  /** Risk score at or above this value is treated as a portfolio warning */
+  portfolioBotRiskAlertThreshold: number;
+  /** Unrealized loss percent at or below this negative value is treated as a warning */
+  portfolioBotLossAlertPct: number;
+  /** Default holding period used when bot analyzes existing holdings */
+  portfolioBotDefaultHoldingDays: number;
+  /** Run a fresh background analysis whenever holdings are added or edited */
+  portfolioBotAnalyzeOnHoldingChange: boolean;
+  /** Maintain one automatic ABOVE/BELOW alert per holding from the bot plan */
+  portfolioBotAutoCreateAlerts: boolean;
   // ── UI ───────────────────────────────────────────────────────────────────
   /** Poll interval for alerts/logs/prices on the frontend (seconds) */
   uiPollIntervalSeconds: number;
@@ -121,6 +140,10 @@ const BOOL_KEYS: SettingKey[] = [
   'watchlistAutoAddAlertSymbol',
   'watchlistAutoRemoveOnAllTriggered',
   'signalEngineEnabled',
+  'portfolioBotEnabled',
+  'portfolioBotSlackEnabled',
+  'portfolioBotAnalyzeOnHoldingChange',
+  'portfolioBotAutoCreateAlerts',
   'slackEnabled',
   'whatsappEnabled',
   'crawlerUseProxy',
@@ -190,6 +213,15 @@ export class SettingsService implements OnModuleInit {
       signalBreakoutRangePct: Number(this.config.get('SIGNAL_BREAKOUT_RANGE_PCT') ?? 80),
       signalDipRangePct: Number(this.config.get('SIGNAL_DIP_RANGE_PCT') ?? 25),
       signalAutoWatchScore: Number(this.config.get('SIGNAL_AUTO_WATCH_SCORE') ?? 0),
+      portfolioBotEnabled: this.config.get('PORTFOLIO_BOT_ENABLED') !== 'false',
+      portfolioBotIntervalMinutes: Number(this.config.get('PORTFOLIO_BOT_INTERVAL_MINUTES') ?? 15),
+      portfolioBotSlackEnabled: this.config.get('PORTFOLIO_BOT_SLACK_ENABLED') !== 'false',
+      portfolioBotSlackRepeatMinutes: Number(this.config.get('PORTFOLIO_BOT_SLACK_REPEAT_MINUTES') ?? 30),
+      portfolioBotRiskAlertThreshold: Number(this.config.get('PORTFOLIO_BOT_RISK_ALERT_THRESHOLD') ?? 65),
+      portfolioBotLossAlertPct: Number(this.config.get('PORTFOLIO_BOT_LOSS_ALERT_PCT') ?? -5),
+      portfolioBotDefaultHoldingDays: Number(this.config.get('PORTFOLIO_BOT_DEFAULT_HOLDING_DAYS') ?? 7),
+      portfolioBotAnalyzeOnHoldingChange: this.config.get('PORTFOLIO_BOT_ANALYZE_ON_HOLDING_CHANGE') !== 'false',
+      portfolioBotAutoCreateAlerts: this.config.get('PORTFOLIO_BOT_AUTO_CREATE_ALERTS') === 'true',
       uiPollIntervalSeconds: Number(this.config.get('UI_POLL_INTERVAL_SECONDS') ?? 5),
       uiLogsMaxDisplay: Number(this.config.get('UI_LOGS_MAX_DISPLAY') ?? 200),
       uiDefaultView: this.config.get<string>('UI_DEFAULT_VIEW') ?? 'overview',

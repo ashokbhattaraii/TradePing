@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Bell,
   BookMarked,
+  Bot,
   CheckCircle2,
   Clock,
   Database,
@@ -33,7 +34,7 @@ import { Button } from './ui/button';
 import { cn } from '@/lib/utils';
 import { NotificationDefaults } from './notification-defaults';
 
-type Tab = 'crawler' | 'alerts' | 'watchlist' | 'intelligence' | 'ui' | 'network' | 'notifications' | 'system';
+type Tab = 'crawler' | 'alerts' | 'watchlist' | 'intelligence' | 'portfolio' | 'ui' | 'network' | 'notifications' | 'system';
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 // ── Preset configurations ────────────────────────────────────────────────────
@@ -88,6 +89,10 @@ interface BoolFieldConfig {
     | 'alertNotifyOnCreate'
     | 'alertNotifyOnExpiry'
     | 'signalEngineEnabled'
+    | 'portfolioBotEnabled'
+    | 'portfolioBotSlackEnabled'
+    | 'portfolioBotAnalyzeOnHoldingChange'
+    | 'portfolioBotAutoCreateAlerts'
     | 'slackEnabled'
     | 'whatsappEnabled'
     | 'crawlerUseProxy'
@@ -449,6 +454,92 @@ const INTELLIGENCE_FIELDS: FieldConfig[] = [
   },
 ];
 
+const PORTFOLIO_BOT_FIELDS: FieldConfig[] = [
+  {
+    kind: 'boolean',
+    key: 'portfolioBotEnabled',
+    label: 'Automatic Portfolio Bot',
+    description: 'Run analysis on manually entered holdings at a fixed interval.',
+    hot: true,
+  },
+  {
+    kind: 'number',
+    key: 'portfolioBotIntervalMinutes',
+    label: 'Analysis Interval',
+    description: 'How often Portfolio Bot recalculates holdings, risk, and action plans.',
+    unit: 'min',
+    min: 1,
+    max: 1440,
+    step: 1,
+    hot: true,
+  },
+  {
+    kind: 'boolean',
+    key: 'portfolioBotSlackEnabled',
+    label: 'Slack Portfolio Summaries',
+    description: 'Send scheduled Portfolio Bot summaries to Slack when a webhook URL is configured.',
+    hot: true,
+  },
+  {
+    kind: 'number',
+    key: 'portfolioBotSlackRepeatMinutes',
+    label: 'Slack Repeat Gap',
+    description: 'Minimum minutes between Portfolio Bot Slack messages.',
+    unit: 'min',
+    min: 0,
+    max: 1440,
+    step: 5,
+    hot: true,
+  },
+  {
+    kind: 'number',
+    key: 'portfolioBotRiskAlertThreshold',
+    label: 'Risk Warning Score',
+    description: 'Portfolio risk score at or above this value becomes ATTENTION.',
+    unit: 'score',
+    min: 1,
+    max: 100,
+    step: 1,
+    hot: true,
+  },
+  {
+    kind: 'number',
+    key: 'portfolioBotLossAlertPct',
+    label: 'Loss Warning',
+    description: 'Holding loss percent at or below this value becomes ATTENTION.',
+    unit: '%',
+    min: -80,
+    max: 0,
+    step: 0.5,
+    hot: true,
+  },
+  {
+    kind: 'number',
+    key: 'portfolioBotDefaultHoldingDays',
+    label: 'Default Holding Period',
+    description: 'Holding period used when Portfolio Bot runs risk analysis on existing assets.',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    step: 1,
+    hot: true,
+  },
+  {
+    kind: 'boolean',
+    key: 'portfolioBotAnalyzeOnHoldingChange',
+    label: 'Analyze After Holding Change',
+    description: 'Queue a fresh automatic analysis when you add or edit a portfolio holding.',
+    hot: true,
+  },
+  {
+    kind: 'boolean',
+    key: 'portfolioBotAutoCreateAlerts',
+    label: 'Auto-create Protective Alerts',
+    description: 'Maintain one automatic ABOVE and BELOW alert per holding from the latest bot plan.',
+    hot: true,
+  },
+];
+
 const UI_FIELDS: FieldConfig[] = [
   {
     kind: 'number',
@@ -487,6 +578,7 @@ const TABS: { id: Tab; label: string; icon: React.ElementType; fields?: FieldCon
   { id: 'alerts', label: 'Alerts', icon: Bell, fields: ALERT_FIELDS },
   { id: 'watchlist', label: 'Watchlist', icon: BookMarked, fields: WATCHLIST_FIELDS },
   { id: 'intelligence', label: 'Signals', icon: Gauge, fields: INTELLIGENCE_FIELDS },
+  { id: 'portfolio', label: 'Portfolio Bot', icon: Bot, fields: PORTFOLIO_BOT_FIELDS },
   { id: 'ui', label: 'UI', icon: Eye, fields: UI_FIELDS },
   { id: 'network', label: 'Network', icon: Globe, fields: NETWORK_FIELDS },
   { id: 'notifications', label: 'Notifications', icon: Send },
@@ -498,6 +590,7 @@ const tabDescriptions: Record<Tab, string> = {
   alerts: 'Set alert limits, retention, repeat behavior, and default form values.',
   watchlist: 'Control list size, expiry, and automatic symbol housekeeping.',
   intelligence: 'Configure TradePing-only scoring, setup labels, and action hints.',
+  portfolio: 'Control automatic holding analysis, risk thresholds, and Slack summary cadence.',
   ui: 'Choose dashboard refresh behavior and the first view users land on.',
   network: 'Manage API-facing origin settings that affect browser access.',
   notifications: 'Connect Slack or WhatsApp delivery and send test messages.',
@@ -794,6 +887,31 @@ export function SettingsPanel() {
                 <SignalPreview label="Edge Score" value="0-100" detail="Combines momentum, range position, and liquidity." />
                 <SignalPreview label="Setup Labels" value="Custom" detail="Breakout, dip, liquidity, and risk hints tuned here." />
                 <SignalPreview label="Action Context" value="In-modal" detail="Appears where you inspect a symbol and decide what to watch." />
+              </div>
+              <Card className="overflow-hidden p-0">
+                <div className="divide-y divide-white/[0.05]">
+                  {fields.map((field) => (
+                    <SettingRow
+                      key={field.key}
+                      field={field}
+                      numValue={field.kind === 'number' ? getNum(field.key as keyof SystemSettings) : 0}
+                      boolValue={field.kind === 'boolean' ? getBool(field.key as BoolSettingKey) : false}
+                      textValue={field.kind === 'text' ? getText(field.key as keyof SystemSettings) : ''}
+                      dirty={field.key in draft}
+                      onChange={handleChange}
+                    />
+                  ))}
+                </div>
+              </Card>
+            </div>
+          )}
+
+          {activeTab === 'portfolio' && !loading && (
+            <div className="grid gap-4">
+              <div className="grid gap-3 rounded-lg border border-sky-400/15 bg-sky-400/[0.04] p-4 sm:grid-cols-3">
+                <SignalPreview label="Holdings" value="Manual" detail="Enter quantity and average cost inside Portfolio Bot." />
+                <SignalPreview label="Automation" value="Interval" detail="Server analyzes holdings even without TMS access." />
+                <SignalPreview label="Slack" value="Optional" detail="Uses your configured webhook and repeat gap." />
               </div>
               <Card className="overflow-hidden p-0">
                 <div className="divide-y divide-white/[0.05]">
@@ -1197,6 +1315,13 @@ function SystemInfoPanel({ settings, loading }: { settings: SystemSettings | nul
           ? `repeats every ${settings.alertRepeatAfterMinutes}min`
           : 'one-shot (no repeat)',
       ].join(' · '),
+    },
+    {
+      icon: Bot,
+      label: 'Portfolio Bot',
+      value: settings?.portfolioBotEnabled
+        ? `every ${settings.portfolioBotIntervalMinutes}min · risk ${settings.portfolioBotRiskAlertThreshold}/100 · Slack ${settings.portfolioBotSlackEnabled ? 'enabled' : 'disabled'} · auto alerts ${settings.portfolioBotAutoCreateAlerts ? 'enabled' : 'disabled'}`
+        : 'automatic analysis disabled',
     },
     { icon: Globe, label: 'CORS Origin', value: settings?.frontendUrl ?? '—', mono: true },
     {

@@ -6,6 +6,7 @@ import { LogsService } from '../logs/logs.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SettingsService } from '../settings/settings.service';
+import { CrawlerService } from '../crawler/crawler.service';
 
 interface AlertRuleSettings {
   autoDeleteTriggeredMinutes: number;
@@ -17,6 +18,7 @@ interface AlertRuleSettings {
 }
 
 const PRIORITY_ORDER: Record<AlertPriority, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+const DAILY_CIRCUIT_LIMIT_PCT = 15;
 
 function toAlert(row: {
   id: string;
@@ -64,6 +66,8 @@ export class AlertsService {
     private readonly notifications: NotificationsService,
     @Inject(forwardRef(() => SettingsService))
     private readonly settings: SettingsService,
+    @Inject(forwardRef(() => CrawlerService))
+    private readonly crawler: CrawlerService,
   ) {}
 
   applyAlertSettings(settings: Partial<AlertRuleSettings>) {
@@ -112,6 +116,7 @@ export class AlertsService {
 
   async create(dto: CreateAlertDto, userId: string): Promise<StockAlert> {
     const symbol = STOCK_ALIASES[dto.symbol] ?? dto.symbol;
+    await this.assertTargetInsideDailyCircuit(symbol, dto.targetPrice);
     const rules = await this.rulesForUser(userId);
     if (rules.maxPerSymbol > 0) {
       const count = await this.prisma.alert.count({
@@ -139,6 +144,32 @@ export class AlertsService {
     const alert = toAlert(row);
     void this.notifications.notifyAlertCreated(alert);
     return alert;
+  }
+
+  private async assertTargetInsideDailyCircuit(symbol: string, targetPrice: number): Promise<void> {
+    const reference = await this.latestPriceFor(symbol);
+    if (!reference) return;
+
+    const lower = this.roundPrice(reference.price * (1 - DAILY_CIRCUIT_LIMIT_PCT / 100));
+    const upper = this.roundPrice(reference.price * (1 + DAILY_CIRCUIT_LIMIT_PCT / 100));
+    if (targetPrice < lower || targetPrice > upper) {
+      throw new BadRequestException(
+        `${symbol} alert target must stay inside Nepal daily circuit range: Rs. ${lower.toLocaleString('en-NP')} - Rs. ${upper.toLocaleString('en-NP')} (${DAILY_CIRCUIT_LIMIT_PCT}% from Rs. ${reference.price.toLocaleString('en-NP')}).`,
+      );
+    }
+  }
+
+  private async latestPriceFor(symbol: string): Promise<{ price: number } | null> {
+    const normalized = (STOCK_ALIASES[symbol] ?? symbol).toUpperCase();
+    let price = this.crawler.getLatestPrices().find((item) => item.symbol === normalized);
+    if (!price) {
+      price = (await this.crawler.refreshPrices()).find((item) => item.symbol === normalized);
+    }
+    return price ? { price: price.price } : null;
+  }
+
+  private roundPrice(value: number): number {
+    return Math.round(value * 10) / 10;
   }
 
   async remove(id: string, userId: string): Promise<{ id: string }> {

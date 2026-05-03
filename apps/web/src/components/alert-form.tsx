@@ -11,6 +11,8 @@ import { Button } from './ui/button';
 import { useToast } from './ui/toast';
 import { cn } from '@/lib/utils';
 
+const DAILY_CIRCUIT_LIMIT_PCT = 15;
+
 const CONDITIONS: {
   value: AlertCondition;
   label: string;
@@ -109,8 +111,18 @@ export function AlertForm({
     () => priceBySymbol.get(STOCK_ALIASES[symbol] ?? symbol),
     [priceBySymbol, symbol],
   );
+  const circuitBounds = useMemo(() => {
+    if (!livePrice) return null;
+    return {
+      lower: Math.round(livePrice.price * (1 - DAILY_CIRCUIT_LIMIT_PCT / 100) * 10) / 10,
+      upper: Math.round(livePrice.price * (1 + DAILY_CIRCUIT_LIMIT_PCT / 100) * 10) / 10,
+    };
+  }, [livePrice]);
 
   const numTarget = Number(targetPrice);
+  const targetOutsideCircuit = Boolean(
+    circuitBounds && targetPrice && Number.isFinite(numTarget) && (numTarget < circuitBounds.lower || numTarget > circuitBounds.upper),
+  );
   const distancePct = useMemo(() => {
     if (!livePrice || !targetPrice || isNaN(numTarget) || numTarget <= 0) return null;
     return ((numTarget - livePrice.price) / livePrice.price) * 100;
@@ -144,6 +156,13 @@ export function AlertForm({
     }
     if (!targetPrice || isNaN(price) || price <= 0) {
       push('error', 'Enter a valid target price');
+      return;
+    }
+    if (circuitBounds && (price < circuitBounds.lower || price > circuitBounds.upper)) {
+      push(
+        'error',
+        `${normalizedSymbol} target must stay inside Rs. ${circuitBounds.lower.toLocaleString('en-NP')} - Rs. ${circuitBounds.upper.toLocaleString('en-NP')} for the ±${DAILY_CIRCUIT_LIMIT_PCT}% daily circuit.`,
+      );
       return;
     }
     setSubmitting(true);
@@ -204,7 +223,7 @@ export function AlertForm({
               }}
               onFocus={() => setDropdownOpen(true)}
               onBlur={() => setTimeout(() => setDropdownOpen(false), 160)}
-              placeholder="Search symbol or company name..."
+              placeholder="Search symbol or company name…"
               className="h-10 w-full rounded-lg border border-white/10 bg-white/5 pl-9 pr-28 text-sm font-mono font-semibold text-white placeholder:font-normal placeholder:text-white/30 transition-colors focus:border-white/30 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-white/10"
             />
             {/* Live price chip */}
@@ -328,6 +347,7 @@ export function AlertForm({
             {targetPrice && (
               <button
                 type="button"
+                aria-label="Clear target price"
                 onClick={() => setTargetPrice('')}
                 className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-0.5 text-white/30 transition-colors hover:text-white/60"
               >
@@ -335,6 +355,42 @@ export function AlertForm({
               </button>
             )}
           </div>
+
+          {circuitBounds && (
+            <div className="mt-3 rounded-lg border border-sky-400/15 bg-sky-400/[0.06] p-3">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-sky-200/70">
+                  Daily circuit guard
+                </span>
+                <span className="font-mono text-xs text-white/55">
+                  Rs. {circuitBounds.lower.toLocaleString('en-NP')} - Rs. {circuitBounds.upper.toLocaleString('en-NP')}
+                </span>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setTargetPrice(String(circuitBounds.lower))}
+                  className="rounded-lg border border-red-400/15 bg-red-400/[0.06] px-3 py-2 text-left transition-[background-color,border-color,color] hover:border-red-400/30 hover:text-red-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
+                >
+                  <span className="block text-[10px] uppercase tracking-wider text-red-200/55">Lower Limit</span>
+                  <span className="font-mono text-sm font-semibold text-red-200">Rs. {circuitBounds.lower.toLocaleString('en-NP')}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTargetPrice(String(circuitBounds.upper))}
+                  className="rounded-lg border border-emerald-400/15 bg-emerald-400/[0.06] px-3 py-2 text-left transition-[background-color,border-color,color] hover:border-emerald-400/30 hover:text-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
+                >
+                  <span className="block text-[10px] uppercase tracking-wider text-emerald-200/55">Upper Limit</span>
+                  <span className="font-mono text-sm font-semibold text-emerald-200">Rs. {circuitBounds.upper.toLocaleString('en-NP')}</span>
+                </button>
+              </div>
+              {targetOutsideCircuit && (
+                <p className="mt-2 text-xs leading-5 text-red-200">
+                  Target crosses Nepal&apos;s ±{DAILY_CIRCUIT_LIMIT_PCT}% daily movement guard. Bring it inside the allowed range.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Distance indicator */}
           <AnimatePresence>
@@ -422,7 +478,7 @@ export function AlertForm({
               maxLength={200}
               value={note}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="e.g. Break above resistance — buy signal"
+              placeholder="e.g. Break above resistance — buy signal…"
               className="h-10 w-full rounded-lg border border-white/10 bg-white/5 px-3 pr-16 text-sm text-white placeholder:text-white/20 transition-colors focus:border-white/30 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-white/10"
             />
             {note && (
@@ -437,7 +493,7 @@ export function AlertForm({
         <Button
           type="submit"
           loading={submitting}
-          disabled={!targetPrice || isNaN(numTarget) || numTarget <= 0}
+          disabled={!targetPrice || isNaN(numTarget) || numTarget <= 0 || targetOutsideCircuit}
           className={cn(
             'w-full justify-center gap-2 transition-all',
             conditionMeta.bg,
@@ -460,11 +516,13 @@ function PriceBar({
   target: number;
   condition: AlertCondition;
 }) {
-  const min = Math.min(current, target) * 0.96;
-  const max = Math.max(current, target) * 1.04;
+  const lowerCircuit = current * (1 - DAILY_CIRCUIT_LIMIT_PCT / 100);
+  const upperCircuit = current * (1 + DAILY_CIRCUIT_LIMIT_PCT / 100);
+  const min = lowerCircuit;
+  const max = upperCircuit;
   const range = max - min || 1;
   const cPct = Math.round(((current - min) / range) * 100);
-  const tPct = Math.round(((target - min) / range) * 100);
+  const tPct = Math.max(0, Math.min(100, Math.round(((target - min) / range) * 100)));
   const fillLeft = Math.min(cPct, tPct);
   const fillWidth = Math.abs(tPct - cPct);
   const isUp = condition === 'ABOVE';

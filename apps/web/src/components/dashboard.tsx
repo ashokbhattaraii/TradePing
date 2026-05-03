@@ -8,6 +8,7 @@ import {
   Bell,
   BookMarked,
   BookOpen,
+  Bot,
   BrainCircuit,
   ChartNoAxesCombined,
   CheckCircle2,
@@ -50,6 +51,7 @@ import { RolesPanel } from './roles-panel';
 import { CrawlerPredictionPanel } from './crawler-prediction-panel';
 import { StockCommandCenter } from './stock-command-center';
 import { PreTradeRiskSimulator } from './pre-trade-risk-simulator';
+import { PortfolioBotCommandCenter } from './portfolio-bot-command-center';
 import { hasAnyPermission } from '@/lib/permissions';
 import { WatchlistPanel } from './watchlist-panel';
 import { ToastProvider, useToast } from './ui/toast';
@@ -68,6 +70,7 @@ import { cn } from '@/lib/utils';
 
 type ViewId =
   | 'overview'
+  | 'portfolio'
   | 'command'
   | 'pretrade'
   | 'market'
@@ -84,6 +87,7 @@ type GlobalFilter = 'all' | 'gainers' | 'losers' | 'live' | 'active' | 'triggere
 
 const views = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, requires: [] },
+  { id: 'portfolio', label: 'Portfolio Bot', icon: Bot, requires: [] },
   { id: 'command', label: 'AI Command', icon: BrainCircuit, requires: [] },
   { id: 'pretrade', label: 'Pre-Trade Risk', icon: Scale, requires: [] },
   { id: 'market', label: 'Live Prices', icon: ChartNoAxesCombined, requires: [] },
@@ -514,6 +518,18 @@ function DashboardInner() {
 
           {activeView === 'command' && (
             <StockCommandCenter stocks={priceList} onAlertCreated={refreshAll} />
+          )}
+
+          {activeView === 'portfolio' && (
+            <PortfolioBotCommandCenter
+              stocks={priceList}
+              alerts={alertList}
+              watchlists={watchlists}
+              activeWatchlistId={activeWatchlistId}
+              onWatchlistsChange={setWatchlists}
+              onActiveWatchlistIdChange={setActiveWatchlistId}
+              onRefresh={refreshAll}
+            />
           )}
 
           {activeView === 'pretrade' && (

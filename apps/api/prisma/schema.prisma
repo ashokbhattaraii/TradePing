@@ -30,9 +30,47 @@ model User {
   notificationRules     NotificationRule[]
   priceHistory          PriceHistory[]
   userSettings          UserSetting[]
+  portfolioHoldings     PortfolioHolding[]
+  portfolioAnalyses     PortfolioAnalysisRun[]
 
   @@index([email])
   @@index([role])
+  @@index([status])
+}
+
+model PortfolioHolding {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  symbol      String
+  quantity    Float
+  averageCost Float
+  note        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, symbol])
+  @@index([userId])
+  @@index([symbol])
+}
+
+model PortfolioAnalysisRun {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status         String
+  reason         String
+  totalCost      Float
+  currentValue   Float
+  unrealizedGain Float
+  gainPct        Float
+  riskScore      Float
+  summary        String
+  decisions      Json     @default("[]")
+  notifiedAt     DateTime?
+  createdAt      DateTime @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
   @@index([status])
 }
 

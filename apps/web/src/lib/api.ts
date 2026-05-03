@@ -154,11 +154,16 @@ export interface CrawlSourceReport {
   id: string;
   source: string;
   url: string;
+  symbol?: string;
+  query?: string;
   status: CrawlStepStatus;
   noticesFound: number;
+  pagesDiscovered?: number;
+  pagesFetched?: number;
   bytesRead: number;
   attempts: number;
   durationMs: number;
+  matchedTerms?: string[];
   error?: string;
 }
 
@@ -168,6 +173,8 @@ export interface CrawlNotice {
   url?: string;
   snippet: string;
   matchedSymbols: string[];
+  matchedTerms?: string[];
+  relevanceScore?: number;
   sentiment: 'positive' | 'neutral' | 'negative';
 }
 
@@ -191,12 +198,25 @@ export interface StockMeta {
   name: string;
 }
 
+export interface CrawlerAiInsight {
+  provider: 'ollama';
+  model: string;
+  host: string;
+  status: 'generated' | 'skipped' | 'error';
+  summary: string;
+  keySignals: string[];
+  risks: string[];
+  actionPlan: string[];
+  error?: string;
+}
+
 export interface CrawlPredictionReport {
   requestedSymbols: string[];
   generatedAt: string;
   steps: CrawlPredictionStep[];
   predictions: StockPrediction[];
   summary: string;
+  aiInsight?: CrawlerAiInsight;
   mode?: 'single' | 'comparison' | 'batch';
   winner?: string;
   sources: CrawlSourceConfig[];
@@ -442,6 +462,15 @@ export interface SystemSettings {
   signalBreakoutRangePct: number;
   signalDipRangePct: number;
   signalAutoWatchScore: number;
+  portfolioBotEnabled: boolean;
+  portfolioBotIntervalMinutes: number;
+  portfolioBotSlackEnabled: boolean;
+  portfolioBotSlackRepeatMinutes: number;
+  portfolioBotRiskAlertThreshold: number;
+  portfolioBotLossAlertPct: number;
+  portfolioBotDefaultHoldingDays: number;
+  portfolioBotAnalyzeOnHoldingChange: boolean;
+  portfolioBotAutoCreateAlerts: boolean;
   uiPollIntervalSeconds: number;
   uiLogsMaxDisplay: number;
   uiDefaultView: string;
@@ -466,6 +495,49 @@ export interface Watchlist {
   symbolAddedAt: Record<string, string>;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PortfolioHolding {
+  id: string;
+  symbol: string;
+  quantity: number;
+  averageCost: number;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PortfolioHoldingAnalysis extends PortfolioHolding {
+  name?: string;
+  currentPrice: number | null;
+  currentValue: number;
+  costBasis: number;
+  unrealizedGain: number;
+  gainPct: number;
+  allocationPct: number;
+  riskLevel: string;
+  riskScore: number;
+  decision: string;
+  commandStance: string;
+  action: string;
+  alertIdeas: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
+  evidence: string[];
+}
+
+export interface PortfolioAnalysisReport {
+  id?: string;
+  generatedAt: string;
+  reason: 'manual' | 'scheduled';
+  status: 'HEALTHY' | 'MONITOR' | 'ATTENTION';
+  totalCost: number;
+  currentValue: number;
+  unrealizedGain: number;
+  gainPct: number;
+  riskScore: number;
+  summary: string;
+  holdings: PortfolioHoldingAnalysis[];
+  nextRunAt: string | null;
+  notifiedAt?: string | null;
 }
 
 export const api = {
@@ -547,6 +619,28 @@ export const api = {
     request<ApiResponse<Watchlist>>(`/watchlists/${id}/symbols`, { method: 'POST', body: JSON.stringify({ symbol }) }),
   removeFromWatchlist: (id: string, symbol: string) =>
     request<ApiResponse<Watchlist>>(`/watchlists/${id}/symbols/${encodeURIComponent(symbol)}`, { method: 'DELETE' }),
+  // ── Portfolio Bot ────────────────────────────────────────────────────────
+  listPortfolioHoldings: () => request<ApiResponse<PortfolioHolding[]>>('/portfolio/holdings'),
+  savePortfolioHolding: (body: { symbol: string; quantity: number; averageCost: number; note?: string }) =>
+    request<ApiResponse<PortfolioHolding>>('/portfolio/holdings', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updatePortfolioHolding: (id: string, body: { quantity?: number; averageCost?: number; note?: string }) =>
+    request<ApiResponse<PortfolioHolding>>(`/portfolio/holdings/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deletePortfolioHolding: (id: string) =>
+    request<ApiResponse<{ id: string }>>(`/portfolio/holdings/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  latestPortfolioAnalysis: () => request<ApiResponse<PortfolioAnalysisReport | null>>('/portfolio/analysis/latest'),
+  portfolioAnalysisHistory: () => request<ApiResponse<PortfolioAnalysisReport[]>>('/portfolio/analysis'),
+  analyzePortfolio: (notify = false) =>
+    request<ApiResponse<PortfolioAnalysisReport>>('/portfolio/analyze', {
+      method: 'POST',
+      body: JSON.stringify({ notify }),
+      timeoutMs: 180_000,
+    }),
   // ── Database management ─────────────────────────────────────────────────
   listDbTables: () => request<ApiResponse<DbTableSummary[]>>('/database/tables'),
   getDbStats: () => request<ApiResponse<Record<string, number>>>('/database/stats'),

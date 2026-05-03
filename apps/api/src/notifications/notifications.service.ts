@@ -18,6 +18,31 @@ interface SlackMessage {
   blocks?: Array<Record<string, unknown>>;
 }
 
+interface PortfolioBotNotificationReport {
+  generatedAt: string;
+  status: string;
+  reason: string;
+  totalCost: number;
+  currentValue: number;
+  unrealizedGain: number;
+  gainPct: number;
+  riskScore: number;
+  summary: string;
+  holdings: Array<{
+    symbol: string;
+    name?: string;
+    quantity: number;
+    averageCost: number;
+    currentPrice: number | null;
+    currentValue: number;
+    unrealizedGain: number;
+    gainPct: number;
+    riskLevel: string;
+    decision: string;
+    action: string;
+  }>;
+}
+
 type NotificationTestOverrides = Partial<
   Pick<SystemSettings, 'slackWebhookUrl' | 'whatsappAccountSid' | 'whatsappAuthToken' | 'whatsappFromNumber' | 'whatsappPhone'>
 >;
@@ -106,6 +131,26 @@ export class NotificationsService {
       this.shouldSendSlack(settings) ? this.sendSlack(this.slackAlertMessage('closed', alert), settings.slackWebhookUrl) : Promise.resolve(),
       settings.whatsappEnabled ? this.sendWhatsApp(message) : Promise.resolve(),
     ]);
+  }
+
+  async notifyPortfolioAnalysis(userId: string, report: PortfolioBotNotificationReport): Promise<NotifyResult> {
+    const settings = await this.effectiveSettings(userId);
+    if (!settings.portfolioBotSlackEnabled || !this.shouldSendSlack(settings)) {
+      return { ok: false, error: 'Portfolio Bot Slack is disabled or webhook URL is not configured.' };
+    }
+
+    const cooldownMin = Math.max(0, settings.portfolioBotSlackRepeatMinutes);
+    if (cooldownMin > 0) {
+      const key = `portfolio:${userId}`;
+      const now = Date.now();
+      const last = this.cooldowns.get(key) || 0;
+      if (now - last < cooldownMin * 60_000) {
+        return { ok: false, error: 'Portfolio Bot Slack cooldown is active.' };
+      }
+      this.cooldowns.set(key, now);
+    }
+
+    return this.sendSlack(this.slackPortfolioBotMessage(report), settings.slackWebhookUrl);
   }
 
   async testSlack(userId?: string, overrides: NotificationTestOverrides = {}): Promise<NotifyResult> {
@@ -204,6 +249,46 @@ export class NotificationsService {
             {
               type: 'mrkdwn',
               text: `TradePing • ${new Date().toLocaleString('en-NP')} • Alert ID ${alert.id.slice(0, 8)}`,
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  private slackPortfolioBotMessage(report: PortfolioBotNotificationReport): SlackMessage {
+    const topRows = report.holdings
+      .slice()
+      .sort((a, b) => Math.abs(b.unrealizedGain) - Math.abs(a.unrealizedGain))
+      .slice(0, 6);
+    const fields = [
+      { type: 'mrkdwn', text: `*Current Value*\n${this.formatMoney(report.currentValue)}` },
+      { type: 'mrkdwn', text: `*Cost Basis*\n${this.formatMoney(report.totalCost)}` },
+      { type: 'mrkdwn', text: `*Unrealized P/L*\n${this.formatMoney(report.unrealizedGain)} (${report.gainPct.toFixed(2)}%)` },
+      { type: 'mrkdwn', text: `*Risk Score*\n${report.riskScore.toFixed(0)}/100` },
+    ];
+    const rows = topRows.length
+      ? topRows
+          .map(
+            (h) =>
+              `*${h.symbol}* ${h.decision.replace('_', ' ')} · ${h.riskLevel} · ${h.gainPct.toFixed(2)}% · ${h.action}`,
+          )
+          .join('\n')
+      : 'No holdings found.';
+
+    return {
+      text: `TradePing Portfolio Bot: ${report.status}`,
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: 'Portfolio Bot Analysis', emoji: true } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${report.status}* · ${report.reason}\n${report.summary}` } },
+        { type: 'section', fields },
+        { type: 'section', text: { type: 'mrkdwn', text: rows } },
+        {
+          type: 'context',
+          elements: [
+            {
+              type: 'mrkdwn',
+              text: `TradePing • ${new Date(report.generatedAt).toLocaleString('en-NP')}`,
             },
           ],
         },
