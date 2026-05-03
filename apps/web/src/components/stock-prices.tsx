@@ -67,6 +67,10 @@ function priceSector(price: PriceSummary): string {
   return price.sector || getSector(price.symbol);
 }
 
+function stockName(price: PriceSummary): string {
+  return price.name && price.name !== price.symbol ? price.name : '';
+}
+
 function resolveSignalSettings(settings?: Partial<SystemSettings>): SignalSettings {
   return {
     signalEngineEnabled: settings?.signalEngineEnabled ?? DEFAULT_SIGNAL_SETTINGS.signalEngineEnabled,
@@ -138,6 +142,7 @@ function PriceCard({
   const up = p.change > 0;
   const flat = p.change === 0;
   const sector = priceSector(p);
+  const name = stockName(p);
 
   return (
     <motion.div
@@ -199,8 +204,9 @@ function PriceCard({
             </Badge>
           </div>
           <div className="mt-1 max-w-[11rem] truncate text-[10px] font-medium uppercase tracking-wider text-white/35">
-            {sector}
+            {name || sector}
           </div>
+          {name && <div className="mt-0.5 max-w-[11rem] truncate text-[10px] text-white/25">{sector}</div>}
           <motion.div
             key={p.price}
             initial={{ opacity: 0.6, y: -4 }}
@@ -438,7 +444,7 @@ export function StockPrices({
               <table className="w-full min-w-[880px] text-left text-sm">
                 <thead className="border-b border-white/10 bg-white/[0.03] text-xs uppercase tracking-wider text-white/40">
                   <tr>
-                    <th className="px-4 py-3 font-medium">Symbol</th>
+                    <th className="px-4 py-3 font-medium">Stock</th>
                     <th className="px-4 py-3 font-medium">Sector</th>
                     <th className="px-4 py-3 font-medium">LTP</th>
                     <th className="px-4 py-3 font-medium">Change</th>
@@ -454,7 +460,10 @@ export function StockPrices({
                 <tbody className="divide-y divide-white/5">
                   {sorted.map((p) => (
                     <tr key={p.symbol} className="[content-visibility:auto] hover:bg-white/[0.03]">
-                      <td className="px-4 py-3 font-mono font-semibold text-white">{p.symbol}</td>
+                      <td className="px-4 py-3">
+                        <div className="font-mono font-semibold text-white">{p.symbol}</div>
+                        {stockName(p) && <div className="mt-0.5 max-w-48 truncate text-xs text-white/40">{stockName(p)}</div>}
+                      </td>
                       <td className="px-4 py-3 text-white/55">{priceSector(p)}</td>
                       <td className="px-4 py-3 tabular-nums text-white">Rs. {fmt(p.price)}</td>
                       <td
@@ -557,6 +566,7 @@ function StockDetailDrawer({
   const turnoverPerShare = price.volume > 0 ? price.turnover / price.volume : price.price;
   const distanceFromPrev = price.prevClose > 0 ? ((price.price - price.prevClose) / price.prevClose) * 100 : 0;
   const sector = priceSector(price);
+  const name = stockName(price);
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-end bg-black/55 p-3 backdrop-blur-sm sm:p-5">
       <button
@@ -584,7 +594,7 @@ function StockDetailDrawer({
               <Badge tone={price.source === 'LIVE' ? 'success' : 'warn'}>{price.source}</Badge>
             </div>
             <p className="mt-1 text-sm text-white/45">
-              Last updated {new Date(price.timestamp).toLocaleString('en-NP')}
+              {name ? `${name} - ` : ''}Last updated {new Date(price.timestamp).toLocaleString('en-NP')}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">

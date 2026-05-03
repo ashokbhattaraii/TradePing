@@ -100,6 +100,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 
 export interface PriceSummary {
   symbol: string;
+  name?: string;
   price: number;
   prevClose: number;
   change: number;
@@ -115,6 +116,7 @@ export interface PriceSummary {
 
 export interface PreviewPrice {
   symbol: string;
+  name?: string;
   price: number;
   change: number;
   changePct: number;
@@ -171,6 +173,7 @@ export interface CrawlNotice {
 
 export interface StockPrediction {
   symbol: string;
+  name?: string;
   verdict: 'BULLISH' | 'WATCH' | 'NEUTRAL' | 'RISK';
   confidence: number;
   score: number;
@@ -181,6 +184,11 @@ export interface StockPrediction {
   sector?: string;
   notices: CrawlNotice[];
   reasons: string[];
+}
+
+export interface StockMeta {
+  symbol: string;
+  name: string;
 }
 
 export interface CrawlPredictionReport {
@@ -342,6 +350,7 @@ export const api = {
   logout: () => request<ApiResponse<{ ok: boolean }>>('/auth/logout', { method: 'POST' }),
   health: () => request<{ status: string; service: string }>('/health', { timeoutMs: 4000 }),
   stocks: () => request<ApiResponse<StockSymbol[]>>('/stocks'),
+  stocksMeta: () => request<ApiResponse<StockMeta[]>>('/stocks/meta'),
   listAlerts: () => request<ApiResponse<StockAlert[]>>('/alerts'),
   createAlert: (body: { symbol: StockSymbol; targetPrice: number; condition: AlertCondition; priority?: AlertPriority; note?: string }) =>
     request<ApiResponse<StockAlert>>('/alerts', { method: 'POST', body: JSON.stringify(body) }),

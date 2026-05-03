@@ -68,7 +68,12 @@ export function LoginTicker() {
               className="grid h-24 w-56 shrink-0 content-between rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-3 shadow-[0_10px_28px_rgba(0,0,0,0.24)] transition-colors hover:border-white/20 hover:bg-white/[0.07]"
             >
               <div className="flex items-start justify-between gap-3">
-                <span className="font-mono text-lg font-bold leading-none tracking-wide text-white">{p.symbol}</span>
+                <span className="min-w-0">
+                  <span className="block font-mono text-lg font-bold leading-none tracking-wide text-white">{p.symbol}</span>
+                  {p.name && p.name !== p.symbol && (
+                    <span className="mt-1 block max-w-28 truncate text-xs text-white/45">{p.name}</span>
+                  )}
+                </span>
                 <span
                   className={`inline-flex min-w-16 items-center justify-center gap-1 rounded-full px-2 py-1 font-mono text-xs font-bold ${
                     up ? 'bg-emerald-400/10 text-emerald-300' : 'bg-rose-400/10 text-rose-300'

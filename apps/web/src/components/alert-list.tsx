@@ -85,6 +85,7 @@ export function AlertList({
                   <AlertCard
                     key={alert.id}
                     alert={alert}
+                    name={livePrice?.name}
                     currentPrice={currentPrice}
                     onDelete={() => handleDelete(alert.id, alert.symbol)}
                   />
@@ -100,10 +101,12 @@ export function AlertList({
 
 function AlertCard({
   alert,
+  name,
   currentPrice,
   onDelete,
 }: {
   alert: StockAlert;
+  name?: string;
   currentPrice: number | null;
   onDelete: () => void;
 }) {
@@ -164,6 +167,9 @@ function AlertCard({
             <Badge tone={triggered ? 'success' : 'info'}>{alert.status}</Badge>
             <PriorityBadge priority={alert.priority} />
           </div>
+          {name && name !== alert.symbol && (
+            <p className="mt-0.5 truncate text-xs text-white/40">{name}</p>
+          )}
 
           {/* Row 2: current price + distance */}
           {currentPrice !== null && (

@@ -36,6 +36,10 @@ function compact(v: number) {
   return new Intl.NumberFormat('en-NP', { notation: 'compact', maximumFractionDigits: 1 }).format(v);
 }
 
+function stockName(price: PriceSummary | null | undefined): string {
+  return price?.name && price.name !== price.symbol ? price.name : '';
+}
+
 // ── WatchlistPanel (main export) ──────────────────────────────────────────────
 export function WatchlistPanel({
   prices = [],
@@ -121,7 +125,7 @@ export function WatchlistPanel({
 
   const filtered = useMemo(() => {
     const q = query.trim().toUpperCase();
-    let items = q ? enriched.filter((r) => r.symbol.includes(q)) : enriched;
+    let items = q ? enriched.filter((r) => r.symbol.includes(q) || stockName(r.price).toUpperCase().includes(q)) : enriched;
     if (sortBy !== 'default') {
       items = [...items].sort((a, b) => {
         let av = 0, bv = 0;
@@ -225,8 +229,8 @@ export function WatchlistPanel({
     const q = addSymbolDraft.trim().toUpperCase();
     const inList = new Set(activeList?.symbols ?? []);
     return prices
+      .filter((p) => !inList.has(p.symbol) && (!q || p.symbol.startsWith(q) || p.symbol.includes(q) || stockName(p).toUpperCase().includes(q)))
       .map((p) => p.symbol)
-      .filter((s) => !inList.has(s) && (!q || s.startsWith(q) || s.includes(q)))
       .slice(0, 12);
   }, [addSymbolDraft, activeList, prices]);
 
@@ -268,7 +272,7 @@ export function WatchlistPanel({
                   const p = prices.find((pr) => pr.symbol === sym);
                   return (
                     <option key={sym} value={sym}>
-                      {sym}{p ? ` · Rs. ${p.price.toLocaleString('en-NP')}` : ''}
+                      {stockName(p) ? `${sym} - ${stockName(p)}` : sym}{p ? ` - Rs. ${p.price.toLocaleString('en-NP')}` : ''}
                     </option>
                   );
                 })}
@@ -499,7 +503,7 @@ export function WatchlistPanel({
             <div className="relative min-w-0 flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-white/30" />
               <Input
-                placeholder={`Filter ${activeList.name}…`}
+                placeholder={`Filter ${activeList.name} by symbol or name...`}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 className="pl-8 text-sm"
@@ -538,15 +542,18 @@ export function WatchlistPanel({
                     transition={{ duration: 0.1 }}
                     className="absolute right-0 top-full z-50 mt-1 max-h-52 w-52 overflow-y-auto rounded-xl border border-white/10 bg-zinc-900 shadow-2xl"
                   >
-                    {suggestedSymbols.map((sym) => {
-                      const p = prices.find((pr) => pr.symbol === sym);
-                      return (
+                  {suggestedSymbols.map((sym) => {
+                    const p = prices.find((pr) => pr.symbol === sym);
+                    return (
                         <li
                           key={sym}
                           onMouseDown={() => { setAddSymbolDraft(sym); void (async () => { setAddingSymbol(true); try { const res = await api.addToWatchlist(activeId, sym); setLists((prev) => prev.map((l) => l.id === activeId ? res.data : l)); setAddSymbolDraft(''); } catch (err) { push('error', (err as Error).message); } finally { setAddingSymbol(false); setSymbolDropdown(false); } })(); }}
                           className="flex cursor-pointer items-center justify-between px-3 py-2 text-sm hover:bg-white/[0.06]"
                         >
-                          <span className="font-mono font-semibold text-white">{sym}</span>
+                          <span className="min-w-0">
+                            <span className="block font-mono font-semibold text-white">{sym}</span>
+                            {stockName(p) && <span className="block max-w-32 truncate text-xs text-white/40">{stockName(p)}</span>}
+                          </span>
                           {p && (
                             <span className={cn('font-mono text-xs', p.change >= 0 ? 'text-emerald-300' : 'text-red-300')}>
                               {p.change >= 0 ? '+' : ''}{p.changePct.toFixed(2)}%
@@ -651,7 +658,10 @@ function SymbolRow({
           rel="noopener noreferrer"
           className="flex items-center gap-1.5 font-mono text-sm font-bold text-white hover:text-sky-300"
         >
-          {symbol}
+          <span className="min-w-0">
+            <span className="block">{symbol}</span>
+            {stockName(price) && <span className="block max-w-40 truncate font-sans text-[11px] font-normal text-white/35">{stockName(price)}</span>}
+          </span>
           <ExternalLink className="h-3 w-3 opacity-0 group-hover:opacity-60" />
         </a>
         {!price && (
@@ -767,7 +777,10 @@ function LeaderRow({
     <div className="flex items-center justify-between gap-2">
       <span className="text-[10px] uppercase tracking-wider text-white/30">{label}</span>
       <div className="flex items-center gap-2">
-        <span className="font-mono text-xs font-bold text-white">{item.symbol}</span>
+        <span>
+          <span className="block font-mono text-xs font-bold text-white">{item.symbol}</span>
+          {stockName(item.price) && <span className="block max-w-28 truncate text-[10px] text-white/35">{stockName(item.price)}</span>}
+        </span>
         <span className={cn('font-mono text-xs', tone === 'up' ? 'text-emerald-300' : 'text-red-300')}>
           {item.price ? `${item.price.changePct >= 0 ? '+' : ''}${item.price.changePct.toFixed(2)}%` : '—'}
         </span>

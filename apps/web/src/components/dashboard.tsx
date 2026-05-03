@@ -203,6 +203,7 @@ function DashboardInner() {
     const q = query.trim().toLowerCase();
     const matches = (...values: (string | number | null | undefined)[]) =>
       !q || values.some((value) => String(value ?? '').toLowerCase().includes(q));
+    const priceBySymbol = new Map(priceList.map((price) => [price.symbol, price]));
     const aliasesFor = (symbol: string) =>
       Object.entries(STOCK_ALIASES)
         .filter(([, target]) => target === symbol)
@@ -219,7 +220,7 @@ function DashboardInner() {
         filter === 'errors';
       return (
         passesFilter &&
-        matches(price.symbol, ...aliasesFor(price.symbol), price.sector ?? getSector(price.symbol), price.source, price.price, price.changePct)
+        matches(price.symbol, price.name, ...aliasesFor(price.symbol), price.sector ?? getSector(price.symbol), price.source, price.price, price.changePct)
       );
     };
 
@@ -232,7 +233,7 @@ function DashboardInner() {
         filter === 'losers' ||
         filter === 'live' ||
         filter === 'errors';
-      return passesFilter && matches(alert.symbol, ...aliasesFor(alert.symbol), alert.status, alert.condition, alert.targetPrice);
+      return passesFilter && matches(alert.symbol, priceBySymbol.get(alert.symbol)?.name, ...aliasesFor(alert.symbol), alert.status, alert.condition, alert.targetPrice);
     };
 
     const logMatches = (log: (typeof logList)[number]) => {
@@ -380,7 +381,7 @@ function DashboardInner() {
                   name="globalSearch"
                   type="search"
                   autoComplete="off"
-                  placeholder="Search symbols, alerts, logs…"
+                  placeholder="Search symbols, company names, alerts, logs..."
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   className="pl-9"
@@ -515,7 +516,7 @@ function DashboardInner() {
             />
           )}
 
-          {activeView === 'crawler' && <CrawlerPredictionPanel symbols={liveSymbols} />}
+          {activeView === 'crawler' && <CrawlerPredictionPanel symbols={liveSymbols} stocks={priceList} />}
 
           {activeView === 'alerts' && (
             <div className="grid gap-5 xl:grid-cols-[minmax(360px,0.7fr)_minmax(0,1fr)]">
@@ -581,6 +582,10 @@ function DashboardInner() {
 
 function chartUrl(symbol: string) {
   return `https://www.nepsealpha.com/trading/chart?symbol=${encodeURIComponent(symbol)}`;
+}
+
+function stockName(price: PriceSummary): string {
+  return price.name && price.name !== price.symbol ? price.name : '';
 }
 
 function OverviewActions({
@@ -752,9 +757,10 @@ function MoverList({
                 href={chartUrl(price.symbol)}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="min-w-0 truncate font-mono text-sm font-semibold text-white hover:text-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
+                className="min-w-0 hover:text-sky-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
               >
-                {price.symbol}
+                <span className="block font-mono text-sm font-semibold text-white">{price.symbol}</span>
+                {stockName(price) && <span className="block max-w-32 truncate text-[11px] text-white/35">{stockName(price)}</span>}
               </a>
               <span
                 className={cn(
@@ -791,6 +797,7 @@ function ChartSpotlight({ price }: { price: PriceSummary | undefined }) {
           <div className="flex items-end justify-between gap-4">
             <div>
               <div className="font-mono text-3xl font-semibold text-white">{price.symbol}</div>
+              {stockName(price) && <div className="mt-1 max-w-60 truncate text-sm text-white/55">{stockName(price)}</div>}
               <div className="mt-1 text-sm text-white/45">Rs. {price.price.toLocaleString('en-NP')}</div>
             </div>
             <div className={cn('font-mono text-sm tabular-nums', price.change >= 0 ? 'text-emerald-300' : 'text-red-300')}>
@@ -837,7 +844,10 @@ function WatchedSymbols({ prices }: { prices: PriceSummary[] }) {
               rel="noopener noreferrer"
               className="flex items-center justify-between gap-3 rounded-lg border border-white/8 bg-white/[0.03] px-3 py-2 transition-[background-color,border-color,color] hover:border-sky-400/30 hover:bg-sky-400/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
             >
-              <span className="font-mono text-sm font-semibold text-white">{price.symbol}</span>
+              <span className="min-w-0">
+                <span className="block font-mono text-sm font-semibold text-white">{price.symbol}</span>
+                {stockName(price) && <span className="block max-w-40 truncate text-[11px] text-white/35">{stockName(price)}</span>}
+              </span>
               <span className={cn('font-mono text-xs tabular-nums', price.change >= 0 ? 'text-emerald-300' : 'text-red-300')}>
                 {price.change >= 0 ? '+' : ''}
                 {price.changePct.toFixed(2)}%

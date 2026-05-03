@@ -29,6 +29,7 @@ import { cn } from '@/lib/utils';
 type CrawlMode = 'single' | 'compare';
 type SourceOption = { id: string; label: string; source: string; url?: string; custom?: boolean };
 type CustomSourceInput = { id: string; label: string; url: string };
+type StockOption = { symbol: string; name?: string };
 
 const SOURCE_OPTIONS: SourceOption[] = [
   { id: 'sharesansar-announcements', label: 'Announcements', source: 'ShareSansar' },
@@ -93,7 +94,7 @@ function crawlStepTemplates(sources: SourceOption[]): CrawlPredictionStep[] {
   ];
 }
 
-export function CrawlerPredictionPanel({ symbols }: { symbols: string[] }) {
+export function CrawlerPredictionPanel({ symbols, stocks = [] }: { symbols: string[]; stocks?: StockOption[] }) {
   const [mode, setMode] = useState<CrawlMode>('single');
   const [singleSymbol, setSingleSymbol] = useState('');
   const [compareSymbols, setCompareSymbols] = useState<string[]>([]);
@@ -108,7 +109,22 @@ export function CrawlerPredictionPanel({ symbols }: { symbols: string[] }) {
   const [error, setError] = useState('');
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const availableSymbols = useMemo(() => (symbols.length ? symbols : ['NABIL', 'HDL', 'NICA', 'ADBL']).slice().sort(), [symbols]);
+  const stockOptions = useMemo(() => {
+    const merged = new Map<string, StockOption>();
+    for (const stock of stocks) merged.set(stock.symbol, stock);
+    for (const symbol of symbols) {
+      if (!merged.has(symbol)) merged.set(symbol, { symbol });
+    }
+    if (merged.size === 0) {
+      for (const symbol of ['NABIL', 'HDL', 'NICA', 'ADBL']) merged.set(symbol, { symbol });
+    }
+    return Array.from(merged.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }, [stocks, symbols]);
+  const availableSymbols = useMemo(() => stockOptions.map((stock) => stock.symbol), [stockOptions]);
+  const stockLabel = (symbol: string) => {
+    const name = stockOptions.find((stock) => stock.symbol === symbol)?.name;
+    return name && name !== symbol ? `${symbol} - ${name}` : symbol;
+  };
   const quickSymbols = useMemo(() => availableSymbols.slice(0, 14), [availableSymbols]);
   const activeSymbols = mode === 'single' ? [singleSymbol].filter(Boolean) : compareSymbols;
   const visibleCount = activeSymbols.length;
@@ -323,7 +339,7 @@ export function CrawlerPredictionPanel({ symbols }: { symbols: string[] }) {
                 <Select value={singleSymbol} onChange={(event) => setSingleSymbol(event.target.value)}>
                   {availableSymbols.map((symbol) => (
                     <option key={symbol} value={symbol} className="bg-zinc-900">
-                      {symbol}
+                      {stockLabel(symbol)}
                     </option>
                   ))}
                 </Select>
@@ -338,7 +354,7 @@ export function CrawlerPredictionPanel({ symbols }: { symbols: string[] }) {
                     <Select value={pendingCompareSymbol} onChange={(event) => setPendingCompareSymbol(event.target.value)}>
                       {availableSymbols.map((symbol) => (
                         <option key={symbol} value={symbol} className="bg-zinc-900">
-                          {symbol}
+                          {stockLabel(symbol)}
                         </option>
                       ))}
                     </Select>
@@ -364,7 +380,7 @@ export function CrawlerPredictionPanel({ symbols }: { symbols: string[] }) {
                           className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5 font-mono text-xs font-semibold text-white/70 transition-colors hover:border-red-400/25 hover:bg-red-400/10 hover:text-red-200"
                           title={`Remove ${symbol}`}
                         >
-                          {symbol} x
+                          {stockLabel(symbol)} x
                         </button>
                       ))
                     )}
@@ -538,6 +554,9 @@ export function CrawlerPredictionPanel({ symbols }: { symbols: string[] }) {
                           <span className="font-mono text-lg font-bold text-white">{prediction.symbol}</span>
                           <Badge tone={verdictTone[prediction.verdict]}>{prediction.verdict}</Badge>
                         </div>
+                        {prediction.name && prediction.name !== prediction.symbol && (
+                          <p className="mt-0.5 truncate text-xs text-white/35">{prediction.name}</p>
+                        )}
                         <p className="mt-1 text-xs text-white/45">
                           {prediction.reasons[0]} {prediction.reasons[1]}
                         </p>
@@ -580,6 +599,9 @@ export function CrawlerPredictionPanel({ symbols }: { symbols: string[] }) {
                         <Badge tone={verdictTone[prediction.verdict]}>{prediction.verdict}</Badge>
                         <Badge tone="default">{prediction.confidence}% confidence</Badge>
                       </div>
+                      {prediction.name && prediction.name !== prediction.symbol && (
+                        <p className="mt-1 text-sm text-white/45">{prediction.name}</p>
+                      )}
                       <div className="mt-2 flex flex-wrap gap-2 text-xs text-white/45">
                         {prediction.price !== undefined && <span>Rs. {prediction.price.toFixed(2)}</span>}
                         {prediction.changePct !== undefined && (
@@ -797,6 +819,9 @@ function PredictionDeepDive({ report }: { report: CrawlPredictionReport }) {
                   <Badge tone={verdictTone[prediction.verdict]}>{prediction.verdict}</Badge>
                   <Badge tone="default">Score {prediction.score}</Badge>
                 </div>
+                {prediction.name && prediction.name !== prediction.symbol && (
+                  <span className="truncate text-xs text-white/35">{prediction.name}</span>
+                )}
                 <span className="font-mono text-xs text-white/45">{prediction.confidence}% confidence</span>
               </div>
               <div className="mt-3 grid gap-2 text-sm text-white/65">

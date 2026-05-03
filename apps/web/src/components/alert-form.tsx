@@ -68,6 +68,7 @@ export function AlertForm({
 }) {
   const { push } = useToast();
   const [allSymbols, setAllSymbols] = useState<string[]>(STOCK_SYMBOLS);
+  const [stockNames, setStockNames] = useState<Record<string, string>>({});
   const [symbol, setSymbol] = useState<StockSymbol>('NABIL');
   const [query, setQuery] = useState('NABIL');
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -81,11 +82,12 @@ export function AlertForm({
   useEffect(() => {
     let cancelled = false;
     api
-      .stocks()
+      .stocksMeta()
       .then((res) => {
         if (cancelled) return;
+        setStockNames(Object.fromEntries(res.data.map((stock) => [stock.symbol, stock.name])));
         const merged = Array.from(
-          new Set([...symbols, ...res.data, ...STOCK_SYMBOLS, ...Object.values(STOCK_ALIASES)]),
+          new Set([...symbols, ...res.data.map((stock) => stock.symbol), ...STOCK_SYMBOLS, ...Object.values(STOCK_ALIASES)]),
         ).sort((a, b) => a.localeCompare(b));
         setAllSymbols(merged);
       })
@@ -101,9 +103,11 @@ export function AlertForm({
     return () => { cancelled = true; };
   }, [symbols]);
 
+  const priceBySymbol = useMemo(() => new Map(prices.map((price) => [price.symbol, price])), [prices]);
+
   const livePrice = useMemo(
-    () => prices.find((p) => p.symbol === (STOCK_ALIASES[symbol] ?? symbol)),
-    [prices, symbol],
+    () => priceBySymbol.get(STOCK_ALIASES[symbol] ?? symbol),
+    [priceBySymbol, symbol],
   );
 
   const numTarget = Number(targetPrice);
@@ -115,8 +119,13 @@ export function AlertForm({
   const filteredSymbols = useMemo(() => {
     const q = query.trim().toUpperCase();
     if (!q) return allSymbols.slice(0, 30);
-    return allSymbols.filter((s) => s.startsWith(q) || s.includes(q)).slice(0, 30);
-  }, [query, allSymbols]);
+    return allSymbols
+      .filter((s) => {
+        const name = priceBySymbol.get(s)?.name ?? stockNames[s] ?? '';
+        return s.startsWith(q) || s.includes(q) || name.toUpperCase().includes(q);
+      })
+      .slice(0, 30);
+  }, [query, allSymbols, priceBySymbol, stockNames]);
 
   const selectSymbol = (s: string) => {
     const normalized = (STOCK_ALIASES[s] ?? s) as StockSymbol;
@@ -195,7 +204,7 @@ export function AlertForm({
               }}
               onFocus={() => setDropdownOpen(true)}
               onBlur={() => setTimeout(() => setDropdownOpen(false), 160)}
-              placeholder="Search NEPSE symbol…"
+              placeholder="Search symbol or company name..."
               className="h-10 w-full rounded-lg border border-white/10 bg-white/5 pl-9 pr-28 text-sm font-mono font-semibold text-white placeholder:font-normal placeholder:text-white/30 transition-colors focus:border-white/30 focus:bg-white/[0.07] focus:outline-none focus:ring-2 focus:ring-white/10"
             />
             {/* Live price chip */}
@@ -227,7 +236,8 @@ export function AlertForm({
                   className="absolute left-0 top-full z-50 mt-1 max-h-52 w-full overflow-y-auto rounded-xl border border-white/10 bg-zinc-900 shadow-2xl"
                 >
                   {filteredSymbols.map((s) => {
-                    const p = prices.find((pr) => pr.symbol === s);
+                    const p = priceBySymbol.get(s);
+                    const name = p?.name ?? stockNames[s];
                     return (
                       <li
                         key={s}
@@ -237,7 +247,12 @@ export function AlertForm({
                           s === symbol ? 'bg-white/[0.08] font-semibold text-white' : 'text-white/70',
                         )}
                       >
-                        <span className="font-mono">{s}</span>
+                        <span className="min-w-0">
+                          <span className="block font-mono">{s}</span>
+                          {name && name !== s && (
+                            <span className="block truncate text-xs font-normal text-white/40">{name}</span>
+                          )}
+                        </span>
                         {p && (
                           <span className="font-mono text-xs text-white/45">
                             Rs. {p.price.toLocaleString('en-NP')}

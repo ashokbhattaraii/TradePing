@@ -36,8 +36,9 @@ export class CrawlerController {
       .getLatestPrices()
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       .slice(0, n)
-      .map(({ symbol, price, change, changePct, sector, source, timestamp }) => ({
+      .map(({ symbol, name, price, change, changePct, sector, source, timestamp }) => ({
         symbol,
+        name,
         price,
         change,
         changePct,

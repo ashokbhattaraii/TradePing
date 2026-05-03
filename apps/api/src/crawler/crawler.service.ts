@@ -13,6 +13,7 @@ const SHARESANSAR_SECTOR_URL = 'https://www.sharesansar.com/sectorwise-share-pri
 const SECTOR_CACHE_TTL_MS = 60 * 60_000;
 
 interface PriceEntry {
+  name?: string;
   price: number;
   prevClose: number;
   high: number;
@@ -26,6 +27,7 @@ interface PriceEntry {
 
 export interface PriceSummary {
   symbol: string;
+  name?: string;
   price: number;
   prevClose: number;
   change: number;
@@ -62,6 +64,7 @@ export interface CrawlNotice {
 
 export interface StockPrediction {
   symbol: string;
+  name?: string;
   verdict: 'BULLISH' | 'WATCH' | 'NEUTRAL' | 'RISK';
   confidence: number;
   score: number;
@@ -109,6 +112,11 @@ export interface CrawlSourceReport {
 export interface CustomCrawlSource {
   label?: string;
   url: string;
+}
+
+interface CompanyMeta {
+  name?: string;
+  sector?: string;
 }
 
 @Injectable()
@@ -570,6 +578,7 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
 
     return {
       symbol,
+      name: price?.name,
       verdict,
       confidence,
       score,
@@ -680,10 +689,17 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     return Array.from(this.priceCache.keys()).sort((a, b) => a.localeCompare(b));
   }
 
+  getAvailableStocks(): { symbol: string; name: string }[] {
+    return Array.from(this.priceCache.entries())
+      .map(([symbol, entry]) => ({ symbol, name: entry.name?.trim() || symbol }))
+      .sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }
+
   /** Returns the latest known price for every symbol that has been fetched. */
   getLatestPrices(): PriceSummary[] {
     return Array.from(this.priceCache.entries()).map(([symbol, v]) => ({
       symbol,
+      name: v.name,
       price: v.price,
       prevClose: v.prevClose,
       change: Math.round((v.price - v.prevClose) * 100) / 100,
@@ -902,6 +918,7 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
       const price = mockPrice(normalizedSymbol);
       const existing = this.priceCache.get(normalizedSymbol);
       this.priceCache.set(normalizedSymbol, {
+        name: existing?.name,
         price,
         prevClose: existing?.prevClose ?? price,
         high: price,
@@ -995,7 +1012,7 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
    */
   private parseHtml(html: string): Map<string, Omit<PriceEntry, 'source' | 'ts'>> {
     const result = new Map<string, Omit<PriceEntry, 'source' | 'ts'>>();
-    const inferredSectors = this.parseCompanySectors(html);
+    const companyMeta = this.parseCompanyMeta(html);
 
     // Split on opening <tr> tags so each chunk is one row's content
     const rows = html.split(/<tr[\s>]/i);
@@ -1018,22 +1035,24 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
       if (isNaN(ltp) || ltp <= 0) continue;
 
       const prevClose = num(cells[12]);
+      const meta = companyMeta.get(symbol);
       result.set(symbol, {
+        name: meta?.name,
         price: ltp,
         prevClose: isNaN(prevClose) || prevClose <= 0 ? ltp : prevClose,
         high: num(cells[4]) || ltp,
         low: num(cells[5]) || ltp,
         volume: num(cells[11]) || 0,
         turnover: num(cells[13]) || 0,
-        sector: inferredSectors.get(symbol),
+        sector: meta?.sector,
       });
     }
 
     return result;
   }
 
-  private parseCompanySectors(html: string): Map<string, string> {
-    const result = new Map<string, string>();
+  private parseCompanyMeta(html: string): Map<string, CompanyMeta> {
+    const result = new Map<string, CompanyMeta>();
     const match = html.match(/var\s+cmpjson\s*=\s*(\[[\s\S]*?\]);/);
     if (!match) return result;
 
@@ -1043,8 +1062,13 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
         const symbol = company.symbol?.replace(/\s+/g, '').toUpperCase();
         if (!symbol || !/^[A-Z0-9]+$/.test(symbol)) continue;
 
-        const sector = this.inferSectorFromCompanyName(company.companyname ?? '');
-        if (sector) result.set(symbol, sector);
+        const name = (company.companyname ?? '')
+          .replace(/<[^>]+>/g, '')
+          .replace(/&amp;/g, '&')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const sector = this.inferSectorFromCompanyName(name);
+        if (name || sector) result.set(symbol, { name: name || undefined, sector: sector ?? undefined });
       }
     } catch {
       return result;
