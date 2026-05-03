@@ -69,6 +69,16 @@ export class CrawlerController {
     return { success: true, data };
   }
 
+  @Get('command/:symbol')
+  async commandCenter(@Param('symbol') symbol: string) {
+    const normalized = String(symbol ?? '').trim();
+    if (!normalized) {
+      throw new BadRequestException('A stock symbol is required');
+    }
+    const data = await this.crawler.getStockCommandReport(normalized);
+    return { success: true, data, message: 'AI stock command report generated' };
+  }
+
   @Post('predict')
   async predict(
     @Body() body: { symbols?: string[] | string; sourceIds?: string[]; customSources?: { label?: string; url: string }[] },

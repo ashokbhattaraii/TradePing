@@ -89,6 +89,80 @@ export interface CrawlPredictionReport {
   sourceReports: CrawlSourceReport[];
 }
 
+export interface BrokerParticipant {
+  broker: string;
+  quantity: number;
+  amount: number;
+  sharePct: number;
+}
+
+export interface BrokerTrade {
+  transactionNo: string;
+  buyer: string;
+  seller: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+}
+
+export interface BrokerActivityReport {
+  status: 'live' | 'limited' | 'unavailable';
+  source: string;
+  url: string;
+  trades: number;
+  totalQuantity: number;
+  totalAmount: number;
+  averageRate: number;
+  concentrationPct: number;
+  topBuyers: BrokerParticipant[];
+  topSellers: BrokerParticipant[];
+  sampleTrades: BrokerTrade[];
+  summary: string;
+}
+
+export interface StockCommandReport {
+  symbol: string;
+  name?: string;
+  generatedAt: string;
+  price: PriceSummary | null;
+  movement: {
+    direction: 'up' | 'down' | 'flat';
+    label: string;
+    changePct: number;
+    dayRangePct: number;
+    volatilityPct: number;
+    samples: number;
+  };
+  sectorComparison: {
+    sector: string;
+    peers: number;
+    sectorAverageChangePct: number;
+    rankByChange: number | null;
+    rankByTurnover: number | null;
+    leaders: Pick<PriceSummary, 'symbol' | 'name' | 'changePct' | 'turnover'>[];
+  };
+  brokerActivity: BrokerActivityReport;
+  notices: CrawlNotice[];
+  risk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+    score: number;
+    factors: string[];
+  };
+  confidence: {
+    score: number;
+    label: 'LOW' | 'MEDIUM' | 'HIGH';
+    coverage: string[];
+  };
+  whyMoving: string[];
+  suggestedPlan: {
+    stance: 'WATCH' | 'ALERT' | 'AVOID' | 'REVIEW';
+    summary: string;
+    alertIdeas: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
+  };
+  prediction: StockPrediction | null;
+  sourceReports: CrawlSourceReport[];
+}
+
 export interface CrawlSourceConfig {
   id: string;
   label: string;
@@ -244,6 +318,55 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
       winner,
       sources: selectedSources,
       sourceReports,
+    };
+  }
+
+  async getStockCommandReport(rawSymbol: string): Promise<StockCommandReport> {
+    const symbol = this.normalizeSymbols([rawSymbol])[0];
+    if (!symbol) throw new Error('A valid stock symbol is required');
+    if (this.priceCache.size === 0) await this.prefetch();
+
+    let prices = this.getLatestPrices();
+    let price = prices.find((item) => item.symbol === symbol) ?? null;
+    if (!price) {
+      await this.fetchPrice(symbol as StockSymbol).catch(() => null);
+      prices = this.getLatestPrices();
+      price = prices.find((item) => item.symbol === symbol) ?? null;
+    }
+
+    const [predictionReport, history, brokerActivity] = await Promise.all([
+      this.analyzeStocks([symbol], 'single'),
+      this.getHistory(symbol, '1d').catch(() => []),
+      this.getBrokerActivity(symbol, price),
+    ]);
+    prices = this.getLatestPrices();
+    price = prices.find((item) => item.symbol === symbol) ?? price;
+
+    const prediction = predictionReport.predictions[0] ?? null;
+    const movement = this.buildMovement(price, history);
+    const sectorComparison = this.buildSectorComparison(symbol, price, prices);
+    const risk = this.buildRiskProfile(price, prediction, brokerActivity, sectorComparison);
+    const confidence = this.buildCommandConfidence(price, predictionReport, brokerActivity, history.length);
+    const whyMoving = this.buildWhyMoving(price, movement, sectorComparison, brokerActivity, predictionReport.predictions[0]?.notices ?? []);
+    const suggestedPlan = this.buildSuggestedPlan(price, prediction, risk);
+
+    this.logs.info(`AI command report generated for ${symbol}`);
+
+    return {
+      symbol,
+      name: price?.name,
+      generatedAt: new Date().toISOString(),
+      price,
+      movement,
+      sectorComparison,
+      brokerActivity,
+      notices: prediction?.notices ?? [],
+      risk,
+      confidence,
+      whyMoving,
+      suggestedPlan,
+      prediction,
+      sourceReports: predictionReport.sourceReports,
     };
   }
 
@@ -590,6 +713,309 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
       notices: relatedNotices,
       reasons,
     };
+  }
+
+  private buildMovement(price: PriceSummary | null, history: { timestamp: string; price: number }[]): StockCommandReport['movement'] {
+    const direction: StockCommandReport['movement']['direction'] = !price || price.change === 0 ? 'flat' : price.change > 0 ? 'up' : 'down';
+    const historyPrices = history.map((item) => item.price).filter((value) => value > 0);
+    const min = historyPrices.length ? Math.min(...historyPrices) : price?.low ?? 0;
+    const max = historyPrices.length ? Math.max(...historyPrices) : price?.high ?? 0;
+    const base = price?.price || max || 1;
+    const volatilityPct = base > 0 ? Math.round(((max - min) / base) * 10000) / 100 : 0;
+    const dayRangePct = price && price.low > 0 ? Math.round(((price.high - price.low) / price.low) * 10000) / 100 : 0;
+    const label =
+      direction === 'up'
+        ? `Price is advancing ${price?.changePct.toFixed(2) ?? '0.00'}% with a ${dayRangePct.toFixed(2)}% intraday range.`
+        : direction === 'down'
+          ? `Price is down ${Math.abs(price?.changePct ?? 0).toFixed(2)}% with a ${dayRangePct.toFixed(2)}% intraday range.`
+          : `Price is mostly flat with a ${dayRangePct.toFixed(2)}% intraday range.`;
+    return {
+      direction,
+      label,
+      changePct: price?.changePct ?? 0,
+      dayRangePct,
+      volatilityPct,
+      samples: history.length,
+    };
+  }
+
+  private buildSectorComparison(
+    symbol: string,
+    price: PriceSummary | null,
+    prices: PriceSummary[],
+  ): StockCommandReport['sectorComparison'] {
+    const sector = price?.sector ?? 'Others';
+    const peers = prices.filter((item) => (item.sector ?? 'Others') === sector);
+    const sortedByChange = [...peers].sort((a, b) => b.changePct - a.changePct);
+    const sortedByTurnover = [...peers].sort((a, b) => (b.turnover ?? 0) - (a.turnover ?? 0));
+    const average = peers.length ? peers.reduce((sum, item) => sum + item.changePct, 0) / peers.length : 0;
+    return {
+      sector,
+      peers: peers.length,
+      sectorAverageChangePct: Math.round(average * 100) / 100,
+      rankByChange: price ? sortedByChange.findIndex((item) => item.symbol === symbol) + 1 || null : null,
+      rankByTurnover: price ? sortedByTurnover.findIndex((item) => item.symbol === symbol) + 1 || null : null,
+      leaders: sortedByChange.slice(0, 5).map((item) => ({
+        symbol: item.symbol,
+        name: item.name,
+        changePct: item.changePct,
+        turnover: item.turnover,
+      })),
+    };
+  }
+
+  private async getBrokerActivity(symbol: string, price: PriceSummary | null): Promise<BrokerActivityReport> {
+    const url = `https://eng.merolagani.com/Floorsheet.aspx?symbol=${encodeURIComponent(symbol)}`;
+    try {
+      const result = await this.fetchTextWithRetry(url, 10_000, 1);
+      const parsed = this.parseBrokerActivity(result.text, symbol, url);
+      if (parsed.trades > 0) return parsed;
+      return this.brokerProxyActivity(symbol, price, url, 'limited');
+    } catch (err) {
+      this.logs.warn(`Broker activity crawl failed for ${symbol}: ${(err as Error).message}`);
+      return this.brokerProxyActivity(symbol, price, url, 'unavailable');
+    }
+  }
+
+  private parseBrokerActivity(html: string, symbol: string, url: string): BrokerActivityReport {
+    const trades: BrokerTrade[] = [];
+    const rows = html.split(/<tr[\s>]/i);
+    for (const row of rows) {
+      const cells: string[] = [];
+      const tdRx = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+      let match: RegExpExecArray | null;
+      while ((match = tdRx.exec(row)) !== null) {
+        cells.push(this.htmlText(match[1]).replace(/\s+/g, ' ').trim());
+      }
+      if (cells.length < 8) continue;
+      const rowSymbol = cells[2]?.replace(/\s+/g, '').toUpperCase();
+      if (rowSymbol !== symbol) continue;
+      const quantity = this.num(cells[5]);
+      const rate = this.num(cells[6]);
+      const amount = this.num(cells[7]);
+      if (quantity <= 0 || amount <= 0) continue;
+      trades.push({
+        transactionNo: cells[1] ?? '',
+        buyer: cells[3] ?? '',
+        seller: cells[4] ?? '',
+        quantity,
+        rate,
+        amount,
+      });
+      if (trades.length >= 80) break;
+    }
+
+    const totalQuantity = trades.reduce((sum, trade) => sum + trade.quantity, 0);
+    const totalAmount = trades.reduce((sum, trade) => sum + trade.amount, 0);
+    const topBuyers = this.rankBrokerParticipants(trades, 'buyer', totalQuantity);
+    const topSellers = this.rankBrokerParticipants(trades, 'seller', totalQuantity);
+    const concentrationPct = Math.max(topBuyers[0]?.sharePct ?? 0, topSellers[0]?.sharePct ?? 0);
+    return {
+      status: trades.length ? 'live' : 'limited',
+      source: 'MeroLagani Floorsheet',
+      url,
+      trades: trades.length,
+      totalQuantity,
+      totalAmount,
+      averageRate: totalQuantity > 0 ? Math.round((totalAmount / totalQuantity) * 100) / 100 : 0,
+      concentrationPct,
+      topBuyers,
+      topSellers,
+      sampleTrades: trades.slice(0, 8),
+      summary: trades.length
+        ? `${trades.length} public floorsheet rows were parsed; top broker concentration is ${concentrationPct.toFixed(1)}%.`
+        : 'No symbol-specific public floorsheet rows were available in the crawled page.',
+    };
+  }
+
+  private brokerProxyActivity(
+    symbol: string,
+    price: PriceSummary | null,
+    url: string,
+    status: BrokerActivityReport['status'],
+  ): BrokerActivityReport {
+    const totalQuantity = price?.volume ?? 0;
+    const totalAmount = price?.turnover ?? 0;
+    return {
+      status,
+      source: 'Live Price Turnover Proxy',
+      url,
+      trades: 0,
+      totalQuantity,
+      totalAmount,
+      averageRate: totalQuantity > 0 ? Math.round((totalAmount / totalQuantity) * 100) / 100 : price?.price ?? 0,
+      concentrationPct: 0,
+      topBuyers: [],
+      topSellers: [],
+      sampleTrades: [],
+      summary: price
+        ? `Broker-level rows were not available, so activity uses live volume ${Math.round(totalQuantity).toLocaleString('en-US')} and turnover Rs. ${Math.round(totalAmount).toLocaleString('en-US')}.`
+        : `Broker-level rows were not available for ${symbol}.`,
+    };
+  }
+
+  private rankBrokerParticipants(trades: BrokerTrade[], side: 'buyer' | 'seller', totalQuantity: number): BrokerParticipant[] {
+    const totals = new Map<string, { quantity: number; amount: number }>();
+    for (const trade of trades) {
+      const broker = trade[side] || 'Unknown';
+      const current = totals.get(broker) ?? { quantity: 0, amount: 0 };
+      current.quantity += trade.quantity;
+      current.amount += trade.amount;
+      totals.set(broker, current);
+    }
+    return Array.from(totals, ([broker, value]) => ({
+      broker,
+      quantity: value.quantity,
+      amount: value.amount,
+      sharePct: totalQuantity > 0 ? Math.round((value.quantity / totalQuantity) * 1000) / 10 : 0,
+    }))
+      .sort((a, b) => b.quantity - a.quantity)
+      .slice(0, 5);
+  }
+
+  private buildRiskProfile(
+    price: PriceSummary | null,
+    prediction: StockPrediction | null,
+    broker: BrokerActivityReport,
+    sector: StockCommandReport['sectorComparison'],
+  ): StockCommandReport['risk'] {
+    let score = 25;
+    const factors: string[] = [];
+    if (!price) {
+      return { level: 'HIGH', score: 75, factors: ['Live price row is unavailable, so the report has weak market evidence.'] };
+    }
+    if (Math.abs(price.changePct) >= 5) {
+      score += 18;
+      factors.push(`Large intraday move: ${price.changePct.toFixed(2)}%.`);
+    }
+    if (price.low > 0 && ((price.high - price.low) / price.low) * 100 >= 6) {
+      score += 15;
+      factors.push('Wide high-low range signals elevated volatility.');
+    }
+    if (prediction?.verdict === 'RISK') {
+      score += 18;
+      factors.push('Crawler sentiment and price score are in risk territory.');
+    }
+    if (price.changePct < sector.sectorAverageChangePct - 2) {
+      score += 10;
+      factors.push('Stock is underperforming its sector by more than 2 percentage points.');
+    }
+    if (broker.concentrationPct >= 35) {
+      score += 10;
+      factors.push(`Broker activity is concentrated around one participant (${broker.concentrationPct.toFixed(1)}%).`);
+    }
+    if (factors.length === 0) factors.push('No extreme price, sector, or broker risk signal was detected.');
+    score = Math.max(0, Math.min(100, Math.round(score)));
+    const level: StockCommandReport['risk']['level'] = score >= 80 ? 'EXTREME' : score >= 60 ? 'HIGH' : score >= 38 ? 'MODERATE' : 'LOW';
+    return { level, score, factors };
+  }
+
+  private buildCommandConfidence(
+    price: PriceSummary | null,
+    report: CrawlPredictionReport,
+    broker: BrokerActivityReport,
+    historySamples: number,
+  ): StockCommandReport['confidence'] {
+    const coverage: string[] = [];
+    let score = 20;
+    if (price) {
+      score += 25;
+      coverage.push('live price');
+    }
+    if (historySamples >= 3) {
+      score += 10;
+      coverage.push('intraday history');
+    }
+    const usableSources = report.sourceReports.filter((source) => source.status === 'done' || source.status === 'warning').length;
+    if (usableSources > 0) {
+      score += Math.min(25, usableSources * 5);
+      coverage.push(`${usableSources} notice sources`);
+    }
+    if (broker.status === 'live') {
+      score += 20;
+      coverage.push('broker floorsheet rows');
+    } else if (broker.status === 'limited') {
+      score += 8;
+      coverage.push('turnover proxy');
+    }
+    score = Math.max(0, Math.min(95, score));
+    return {
+      score,
+      label: score >= 75 ? 'HIGH' : score >= 50 ? 'MEDIUM' : 'LOW',
+      coverage,
+    };
+  }
+
+  private buildWhyMoving(
+    price: PriceSummary | null,
+    movement: StockCommandReport['movement'],
+    sector: StockCommandReport['sectorComparison'],
+    broker: BrokerActivityReport,
+    notices: CrawlNotice[],
+  ): string[] {
+    const reasons = [movement.label];
+    if (price) {
+      const gap = price.changePct - sector.sectorAverageChangePct;
+      reasons.push(
+        gap >= 0
+          ? `It is outperforming the ${sector.sector} average by ${gap.toFixed(2)} percentage points.`
+          : `It is lagging the ${sector.sector} average by ${Math.abs(gap).toFixed(2)} percentage points.`,
+      );
+    }
+    if (notices.length > 0) {
+      reasons.push(`${notices.length} related notice/news item${notices.length === 1 ? '' : 's'} matched this stock.`);
+    }
+    if (broker.trades > 0) {
+      reasons.push(broker.summary);
+    } else if (price?.turnover) {
+      reasons.push(`Turnover proxy shows Rs. ${Math.round(price.turnover).toLocaleString('en-US')} traded.`);
+    }
+    return reasons.slice(0, 5);
+  }
+
+  private buildSuggestedPlan(
+    price: PriceSummary | null,
+    prediction: StockPrediction | null,
+    risk: StockCommandReport['risk'],
+  ): StockCommandReport['suggestedPlan'] {
+    if (!price) {
+      return {
+        stance: 'REVIEW',
+        summary: 'Review manually because live price data is not available.',
+        alertIdeas: [],
+      };
+    }
+    const upper = Math.round(price.price * 1.02 * 10) / 10;
+    const lower = Math.round(price.price * 0.98 * 10) / 10;
+    const stance: StockCommandReport['suggestedPlan']['stance'] =
+      risk.level === 'HIGH' || risk.level === 'EXTREME'
+        ? 'AVOID'
+        : prediction?.verdict === 'BULLISH'
+          ? 'ALERT'
+          : prediction?.verdict === 'WATCH'
+            ? 'WATCH'
+            : 'REVIEW';
+    const summary =
+      stance === 'AVOID'
+        ? 'Avoid chasing until volatility cools or the next crawl confirms stronger evidence.'
+        : stance === 'ALERT'
+          ? 'Set breakout and failure alerts; only act when price confirms with volume.'
+          : stance === 'WATCH'
+            ? 'Keep it on watch and wait for either a breakout or a clean pullback.'
+            : 'Review the stock again after more live data and notices accumulate.';
+    return {
+      stance,
+      summary,
+      alertIdeas: [
+        { condition: 'ABOVE', targetPrice: upper, reason: 'Breakout confirmation above current price.' },
+        { condition: 'BELOW', targetPrice: lower, reason: 'Risk control if momentum fails.' },
+      ],
+    };
+  }
+
+  private num(value: string | undefined): number {
+    const parsed = parseFloat((value ?? '').replace(/,/g, ''));
+    return Number.isFinite(parsed) ? parsed : 0;
   }
 
   private async persistSnapshot() {

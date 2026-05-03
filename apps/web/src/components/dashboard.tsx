@@ -8,6 +8,7 @@ import {
   Bell,
   BookMarked,
   BookOpen,
+  BrainCircuit,
   ChartNoAxesCombined,
   CheckCircle2,
   Command,
@@ -46,6 +47,7 @@ import { DatabasePanel } from './database-panel';
 import { UsersPanel } from './users-panel';
 import { RolesPanel } from './roles-panel';
 import { CrawlerPredictionPanel } from './crawler-prediction-panel';
+import { StockCommandCenter } from './stock-command-center';
 import { hasAnyPermission } from '@/lib/permissions';
 import { WatchlistPanel } from './watchlist-panel';
 import { ToastProvider, useToast } from './ui/toast';
@@ -64,6 +66,7 @@ import { cn } from '@/lib/utils';
 
 type ViewId =
   | 'overview'
+  | 'command'
   | 'market'
   | 'crawler'
   | 'alerts'
@@ -78,6 +81,7 @@ type GlobalFilter = 'all' | 'gainers' | 'losers' | 'live' | 'active' | 'triggere
 
 const views = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard, requires: [] },
+  { id: 'command', label: 'AI Command', icon: BrainCircuit, requires: [] },
   { id: 'market', label: 'Live Prices', icon: ChartNoAxesCombined, requires: [] },
   { id: 'crawler', label: 'Crawler', icon: Radar, requires: [] },
   { id: 'alerts', label: 'Alerts', icon: Bell, requires: [] },
@@ -502,6 +506,10 @@ function DashboardInner() {
                 </div>
               </div>
             </div>
+          )}
+
+          {activeView === 'command' && (
+            <StockCommandCenter stocks={priceList} onAlertCreated={refreshAll} />
           )}
 
           {activeView === 'market' && (

@@ -203,6 +203,78 @@ export interface CrawlPredictionReport {
   sourceReports: CrawlSourceReport[];
 }
 
+export interface BrokerParticipant {
+  broker: string;
+  quantity: number;
+  amount: number;
+  sharePct: number;
+}
+
+export interface BrokerTrade {
+  transactionNo: string;
+  buyer: string;
+  seller: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+}
+
+export interface StockCommandReport {
+  symbol: string;
+  name?: string;
+  generatedAt: string;
+  price: PriceSummary | null;
+  movement: {
+    direction: 'up' | 'down' | 'flat';
+    label: string;
+    changePct: number;
+    dayRangePct: number;
+    volatilityPct: number;
+    samples: number;
+  };
+  sectorComparison: {
+    sector: string;
+    peers: number;
+    sectorAverageChangePct: number;
+    rankByChange: number | null;
+    rankByTurnover: number | null;
+    leaders: Pick<PriceSummary, 'symbol' | 'name' | 'changePct' | 'turnover'>[];
+  };
+  brokerActivity: {
+    status: 'live' | 'limited' | 'unavailable';
+    source: string;
+    url: string;
+    trades: number;
+    totalQuantity: number;
+    totalAmount: number;
+    averageRate: number;
+    concentrationPct: number;
+    topBuyers: BrokerParticipant[];
+    topSellers: BrokerParticipant[];
+    sampleTrades: BrokerTrade[];
+    summary: string;
+  };
+  notices: CrawlNotice[];
+  risk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+    score: number;
+    factors: string[];
+  };
+  confidence: {
+    score: number;
+    label: 'LOW' | 'MEDIUM' | 'HIGH';
+    coverage: string[];
+  };
+  whyMoving: string[];
+  suggestedPlan: {
+    stance: 'WATCH' | 'ALERT' | 'AVOID' | 'REVIEW';
+    summary: string;
+    alertIdeas: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
+  };
+  prediction: StockPrediction | null;
+  sourceReports: CrawlSourceReport[];
+}
+
 export type UserRole = string;
 export type UserStatus = 'ACTIVE' | 'SUSPENDED' | 'INVITED';
 
@@ -362,6 +434,8 @@ export const api = {
     request<ApiResponse<PreviewPrice[]>>(`/crawler/prices/preview?limit=${limit}`, { retries: 1, timeoutMs: 6000 }),
   priceHistory: (symbol: string, range: '1d' | '5d' | '1mo' = '1d') =>
     request<ApiResponse<PricePoint[]>>(`/crawler/prices/${encodeURIComponent(symbol)}/history?range=${range}`),
+  stockCommand: (symbol: string) =>
+    request<ApiResponse<StockCommandReport>>(`/crawler/command/${encodeURIComponent(symbol)}`, { timeoutMs: 150_000 }),
   predictStocks: (symbols: string[], sourceIds?: string[], customSources?: { label?: string; url: string }[]) =>
     request<ApiResponse<CrawlPredictionReport>>('/crawler/predict', {
       method: 'POST',
