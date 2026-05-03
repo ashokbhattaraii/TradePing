@@ -6,7 +6,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { CrawlerService, type PriceSummary, type PreTradeRiskReport, type StockCommandReport } from '../crawler/crawler.service';
+import { CrawlerService, type CrawlPredictionReport, type PriceSummary, type PreTradeRiskReport, type StockCommandReport } from '../crawler/crawler.service';
 import { SettingsService } from '../settings/settings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { LogsService } from '../logs/logs.service';
@@ -34,6 +34,11 @@ export interface PortfolioHoldingAnalysis extends PortfolioHoldingDto {
   riskScore: number;
   decision: string;
   commandStance: string;
+  crawlerVerdict: string;
+  crawlerConfidence: number;
+  crawlerNotices: number;
+  crawlerSources: number;
+  crawlerSummary: string;
   action: string;
   alertIdeas: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
   evidence: string[];
@@ -68,6 +73,7 @@ type HoldingRow = {
 
 const WORKER_TICK_MS = 60_000;
 const DAILY_CIRCUIT_LIMIT_PCT = 15;
+const PORTFOLIO_ANALYSIS_CONCURRENCY = 3;
 
 function toHoldingDto(row: HoldingRow): PortfolioHoldingDto {
   return {
@@ -91,6 +97,7 @@ export class PortfolioService implements OnModuleInit, OnModuleDestroy {
   private worker: NodeJS.Timeout | null = null;
   private runningUsers = new Set<string>();
   private holdingChangeTimers = new Map<string, NodeJS.Timeout>();
+  private firstAutoRunAfter = new Map<string, number>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -215,34 +222,33 @@ export class PortfolioService implements OnModuleInit, OnModuleDestroy {
       prices = await this.crawler.refreshPrices();
     }
     const priceMap = new Map(prices.map((price) => [price.symbol, price]));
-    const analyses: PortfolioHoldingAnalysis[] = [];
 
-    for (const holding of holdings) {
+    const analyses = await this.mapWithConcurrency(holdings, PORTFOLIO_ANALYSIS_CONCURRENCY, async (holding) => {
       const price = priceMap.get(holding.symbol) ?? null;
       const currentPrice = price?.price ?? holding.averageCost;
       const currentValue = currentPrice * holding.quantity;
       const costBasis = holding.averageCost * holding.quantity;
       const unrealizedGain = currentValue - costBasis;
       const gainPct = costBasis > 0 ? (unrealizedGain / costBasis) * 100 : 0;
-      const [risk, command] = await Promise.all([
+      const [risk, command, crawl] = await Promise.all([
         this.safeRisk(holding.symbol, Math.max(currentValue, costBasis), settings.portfolioBotDefaultHoldingDays),
         this.safeCommand(holding.symbol),
+        this.safeCrawl(holding.symbol),
       ]);
-      analyses.push(
-        this.buildHoldingAnalysis({
-          holding,
-          price,
-          currentPrice,
-          currentValue,
-          costBasis,
-          unrealizedGain,
-          gainPct,
-          risk,
-          command,
-          lossAlertPct: settings.portfolioBotLossAlertPct,
-        }),
-      );
-    }
+      return this.buildHoldingAnalysis({
+        holding,
+        price,
+        currentPrice,
+        currentValue,
+        costBasis,
+        unrealizedGain,
+        gainPct,
+        risk,
+        command,
+        crawl,
+        lossAlertPct: settings.portfolioBotLossAlertPct,
+      });
+    });
 
     const totalCost = analyses.reduce((sum, item) => sum + item.costBasis, 0);
     const currentValue = analyses.reduce((sum, item) => sum + item.currentValue, 0);
@@ -334,15 +340,19 @@ export class PortfolioService implements OnModuleInit, OnModuleDestroy {
       try {
         const settings = await this.settings.getForUser(userId);
         if (!settings.portfolioBotEnabled || settings.portfolioBotIntervalMinutes <= 0) continue;
+        const firstAutoRunAfter = this.firstAutoRunAfter.get(userId);
         const latest = await this.prisma.portfolioAnalysisRun.findFirst({
           where: { userId },
           orderBy: { createdAt: 'desc' },
         });
-        const dueAt = latest
+        const dueAt = firstAutoRunAfter ?? (latest
           ? latest.createdAt.getTime() + settings.portfolioBotIntervalMinutes * 60_000
-          : 0;
+          : Date.now() + 15_000);
         if (Date.now() >= dueAt) {
           await this.analyze(userId, { reason: 'scheduled', notify: true });
+          this.firstAutoRunAfter.delete(userId);
+        } else if (!latest && !firstAutoRunAfter) {
+          this.firstAutoRunAfter.set(userId, dueAt);
         }
       } catch (err) {
         this.logs.warn(`Portfolio Bot scheduled analysis failed: ${(err as Error).message}`);
@@ -449,19 +459,25 @@ export class PortfolioService implements OnModuleInit, OnModuleDestroy {
     gainPct: number;
     risk: PreTradeRiskReport | null;
     command: StockCommandReport | null;
+    crawl: CrawlPredictionReport | null;
     lossAlertPct: number;
   }): PortfolioHoldingAnalysis {
-    const { holding, price, currentPrice, currentValue, costBasis, unrealizedGain, gainPct, risk, command, lossAlertPct } = input;
+    const { holding, price, currentPrice, currentValue, costBasis, unrealizedGain, gainPct, risk, command, crawl, lossAlertPct } = input;
+    const crawlPrediction = crawl?.predictions.find((prediction) => prediction.symbol === holding.symbol) ?? crawl?.predictions[0] ?? null;
     const fallbackRiskScore = gainPct <= lossAlertPct ? 70 : gainPct < 0 ? 48 : 28;
     const riskScore = risk?.overall.score ?? command?.risk.score ?? fallbackRiskScore;
     const riskLevel = risk?.overall.level ?? command?.risk.level ?? (riskScore >= 65 ? 'HIGH' : riskScore >= 38 ? 'MODERATE' : 'LOW');
     const decision = risk?.overall.decision ?? (riskScore >= 65 ? 'WAIT' : 'PASS');
     const commandStance = command?.suggestedPlan.stance ?? 'WATCH';
-    const action = this.actionFor(decision, commandStance, riskScore, gainPct, lossAlertPct);
+    const crawlerVerdict = crawlPrediction?.verdict ?? 'PENDING';
+    const action = this.actionFor(decision, commandStance, crawlerVerdict, riskScore, gainPct, lossAlertPct);
     const evidence = [
       price ? `Live price ${price.source}: Rs. ${round(price.price)}` : 'Live price unavailable; average cost used.',
       risk ? `Pre-trade risk: ${risk.overall.level} / ${risk.overall.score}` : 'Pre-trade risk could not run.',
       command ? `Command stance: ${command.suggestedPlan.stance} / ${command.confidence.score}% confidence` : 'AI command report could not run.',
+      crawl
+        ? `Deep crawl: ${crawlerVerdict} / ${crawlPrediction?.confidence ?? 0}% with ${crawl.sourceReports.filter((source) => source.status !== 'error').length} usable sources.`
+        : 'Deep crawl could not run.',
     ];
 
     return {
@@ -477,17 +493,24 @@ export class PortfolioService implements OnModuleInit, OnModuleDestroy {
       riskScore: round(riskScore),
       decision,
       commandStance,
+      crawlerVerdict,
+      crawlerConfidence: crawlPrediction?.confidence ?? 0,
+      crawlerNotices: crawlPrediction?.notices.length ?? 0,
+      crawlerSources: crawl?.sourceReports.filter((source) => source.status !== 'error').length ?? 0,
+      crawlerSummary: crawl?.summary ?? 'No crawler summary available.',
       action,
       alertIdeas: [...(risk?.alertPlan ?? []), ...(command?.suggestedPlan.alertIdeas ?? [])].slice(0, 4),
       evidence,
     };
   }
 
-  private actionFor(decision: string, stance: string, riskScore: number, gainPct: number, lossAlertPct: number): string {
+  private actionFor(decision: string, stance: string, crawlerVerdict: string, riskScore: number, gainPct: number, lossAlertPct: number): string {
     if (decision === 'AVOID' || stance === 'AVOID' || riskScore >= 80) return 'Reduce exposure or wait for fresh confirmation.';
     if (gainPct <= lossAlertPct) return 'Review exit difficulty and protect with a downside alert.';
+    if (crawlerVerdict === 'RISK') return 'Hold only after checking crawler evidence and protective alerts.';
     if (decision === 'WAIT' || riskScore >= 65) return 'Hold only with strict alerts and no averaging down.';
     if (stance === 'ALERT') return 'Keep on watch and let alerts control action.';
+    if (crawlerVerdict === 'BULLISH') return 'Hold/watch; crawler evidence supports active monitoring.';
     return 'Hold/watch with normal monitoring.';
   }
 
@@ -510,12 +533,27 @@ export class PortfolioService implements OnModuleInit, OnModuleDestroy {
   private async nextRunAt(userId: string): Promise<string | null> {
     const settings = await this.settings.getForUser(userId);
     if (!settings.portfolioBotEnabled || settings.portfolioBotIntervalMinutes <= 0) return null;
+    const firstAutoRunAfter = this.firstAutoRunAfter.get(userId);
+    if (firstAutoRunAfter) return new Date(firstAutoRunAfter).toISOString();
     const latest = await this.prisma.portfolioAnalysisRun.findFirst({
       where: { userId },
       orderBy: { createdAt: 'desc' },
     });
     const base = latest?.createdAt.getTime() ?? Date.now();
     return new Date(base + settings.portfolioBotIntervalMinutes * 60_000).toISOString();
+  }
+
+  private async mapWithConcurrency<T, R>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+    const results: R[] = new Array(items.length);
+    let index = 0;
+    const runners = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
+      while (index < items.length) {
+        const current = index++;
+        results[current] = await worker(items[current], current);
+      }
+    });
+    await Promise.all(runners);
+    return results;
   }
 
   private async runToReport(row: {
@@ -561,6 +599,15 @@ export class PortfolioService implements OnModuleInit, OnModuleDestroy {
     try {
       return await this.crawler.getStockCommandReport(symbol);
     } catch {
+      return null;
+    }
+  }
+
+  private async safeCrawl(symbol: string): Promise<CrawlPredictionReport | null> {
+    try {
+      return await this.crawler.analyzeSingleStock(symbol);
+    } catch (err) {
+      this.logs.warn(`Portfolio Bot deep crawl failed for ${symbol}: ${(err as Error).message}`);
       return null;
     }
   }

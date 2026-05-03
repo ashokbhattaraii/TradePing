@@ -519,6 +519,11 @@ export interface PortfolioHoldingAnalysis extends PortfolioHolding {
   riskScore: number;
   decision: string;
   commandStance: string;
+  crawlerVerdict: string;
+  crawlerConfidence: number;
+  crawlerNotices: number;
+  crawlerSources: number;
+  crawlerSummary: string;
   action: string;
   alertIdeas: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
   evidence: string[];

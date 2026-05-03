@@ -39,6 +39,9 @@ interface PortfolioBotNotificationReport {
     gainPct: number;
     riskLevel: string;
     decision: string;
+    crawlerVerdict?: string;
+    crawlerNotices?: number;
+    crawlerSources?: number;
     action: string;
   }>;
 }
@@ -271,7 +274,7 @@ export class NotificationsService {
       ? topRows
           .map(
             (h) =>
-              `*${h.symbol}* ${h.decision.replace('_', ' ')} · ${h.riskLevel} · ${h.gainPct.toFixed(2)}% · ${h.action}`,
+              `*${h.symbol}* ${h.decision.replace('_', ' ')} · ${h.riskLevel} · ${h.gainPct.toFixed(2)}% · Crawl ${h.crawlerVerdict ?? 'N/A'} (${h.crawlerNotices ?? 0}/${h.crawlerSources ?? 0}) · ${h.action}`,
           )
           .join('\n')
       : 'No holdings found.';

@@ -8,19 +8,24 @@ import {
   Bot,
   BrainCircuit,
   CheckCircle2,
+  Clock3,
   GitCompareArrows,
   Globe2,
   Layers3,
   Loader2,
   Play,
   Radar,
+  RefreshCw,
   Route,
   Scale,
   ShieldAlert,
+  SlidersHorizontal,
   Sparkles,
+  Table2,
   Target,
   Trash2,
   WalletCards,
+  Zap,
 } from 'lucide-react';
 import {
   api,
@@ -30,6 +35,7 @@ import {
   type PriceSummary,
   type PreTradeRiskReport,
   type StockCommandReport,
+  type SystemSettings,
   type Watchlist,
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -165,8 +171,11 @@ export function PortfolioBotCommandCenter({
   const [busyAction, setBusyAction] = useState('');
   const [holdings, setHoldings] = useState<PortfolioHolding[]>([]);
   const [latestAnalysis, setLatestAnalysis] = useState<PortfolioAnalysisReport | null>(null);
+  const [analysisHistory, setAnalysisHistory] = useState<PortfolioAnalysisReport[]>([]);
+  const [settings, setSettings] = useState<SystemSettings | null>(null);
   const [portfolioLoading, setPortfolioLoading] = useState(true);
   const [portfolioAnalyzing, setPortfolioAnalyzing] = useState(false);
+  const [automationSaving, setAutomationSaving] = useState(false);
   const [quantity, setQuantity] = useState('');
   const [averageCost, setAverageCost] = useState('');
   const [holdingNote, setHoldingNote] = useState('');
@@ -184,15 +193,56 @@ export function PortfolioBotCommandCenter({
     if (!compareSymbol && stockOptions[1]) setCompareSymbol(stockOptions[1].symbol);
   }, [compareSymbol, stockOptions, symbol]);
 
+  const loadPortfolioData = async () => {
+    setPortfolioLoading(true);
+    try {
+      const [holdingRes, analysisRes, historyRes, settingsRes] = await Promise.all([
+        api.listPortfolioHoldings(),
+        api.latestPortfolioAnalysis(),
+        api.portfolioAnalysisHistory(),
+        api.getSettings(),
+      ]);
+      setHoldings(holdingRes.data);
+      setLatestAnalysis(analysisRes.data);
+      setAnalysisHistory(historyRes.data);
+      setSettings(settingsRes.data);
+    } catch (err) {
+      push('error', (err as Error).message || 'Failed to load portfolio bot data.');
+    } finally {
+      setPortfolioLoading(false);
+    }
+  };
+
   useEffect(() => {
-    Promise.all([api.listPortfolioHoldings(), api.latestPortfolioAnalysis()])
-      .then(([holdingRes, analysisRes]) => {
-        setHoldings(holdingRes.data);
-        setLatestAnalysis(analysisRes.data);
-      })
-      .catch((err) => push('error', (err as Error).message || 'Failed to load portfolio bot data.'))
-      .finally(() => setPortfolioLoading(false));
-  }, [push]);
+    void loadPortfolioData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const refreshPortfolioData = async () => {
+    await loadPortfolioData();
+    push('success', 'Portfolio Bot refreshed');
+  };
+
+  const updateAutomation = async (patch: Partial<Omit<SystemSettings, 'port'>>) => {
+    setAutomationSaving(true);
+    try {
+      const res = await api.updateSettings(patch);
+      setSettings(res.data);
+      push('success', patch.portfolioBotEnabled === true ? 'Auto Mode enabled. First analysis will run in the background.' : 'Portfolio Bot automation updated');
+    } catch (err) {
+      push('error', (err as Error).message || 'Failed to update Portfolio Bot automation.');
+    } finally {
+      setAutomationSaving(false);
+    }
+  };
+
+  const updateAutomationNumber = (key: keyof Pick<SystemSettings,
+    'portfolioBotIntervalMinutes' | 'portfolioBotSlackRepeatMinutes' | 'portfolioBotDefaultHoldingDays' | 'portfolioBotRiskAlertThreshold' | 'portfolioBotLossAlertPct'
+  >, value: string) => {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return;
+    void updateAutomation({ [key]: number } as Partial<Omit<SystemSettings, 'port'>>);
+  };
 
   useEffect(() => {
     const existing = holdings.find((holding) => holding.symbol === symbol);
@@ -271,6 +321,7 @@ export function PortfolioBotCommandCenter({
     try {
       const res = await api.analyzePortfolio(notifySlack);
       setLatestAnalysis(res.data);
+      setAnalysisHistory((current) => [res.data, ...current.filter((item) => item.id !== res.data.id)].slice(0, 20));
       push('success', notifySlack ? 'Portfolio analysis completed and Slack was requested' : 'Portfolio analysis completed');
     } catch (err) {
       push('error', (err as Error).message || 'Failed to analyze portfolio.');
@@ -706,9 +757,26 @@ export function PortfolioBotCommandCenter({
               watched={watched}
             />
 
+            <AutoModePanel
+              settings={settings}
+              loading={portfolioLoading || automationSaving}
+              analyzing={portfolioAnalyzing}
+              holdingsCount={holdings.length}
+              latestAnalysis={latestAnalysis}
+              onRefresh={refreshPortfolioData}
+              onRunNow={runPortfolioAnalysis}
+              onToggle={(enabled) => updateAutomation({ portfolioBotEnabled: enabled })}
+              onBooleanChange={(key, value) => updateAutomation({ [key]: value } as Partial<Omit<SystemSettings, 'port'>>)}
+              onNumberChange={updateAutomationNumber}
+            />
+
+            <PortfolioPerformanceTable holdings={holdings} report={latestAnalysis} stocks={stocks} loading={portfolioLoading || portfolioAnalyzing} />
+
             <MarketCircuitPanel selectedStock={selectedStock} bounds={selectedCircuit} />
 
             <PortfolioAnalysisPanel report={latestAnalysis} loading={portfolioLoading || portfolioAnalyzing} />
+
+            <AutomationHistoryPanel history={analysisHistory} loading={portfolioLoading} />
 
             <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(360px,1.1fr)]">
               <div className="rounded-lg border border-white/10 bg-black/15 p-4">
@@ -747,6 +815,278 @@ export function PortfolioBotCommandCenter({
   );
 }
 
+function AutoModePanel({
+  settings,
+  loading,
+  analyzing,
+  holdingsCount,
+  latestAnalysis,
+  onRefresh,
+  onRunNow,
+  onToggle,
+  onBooleanChange,
+  onNumberChange,
+}: {
+  settings: SystemSettings | null;
+  loading: boolean;
+  analyzing: boolean;
+  holdingsCount: number;
+  latestAnalysis: PortfolioAnalysisReport | null;
+  onRefresh: () => void;
+  onRunNow: () => void;
+  onToggle: (enabled: boolean) => void;
+  onBooleanChange: (key: 'portfolioBotSlackEnabled' | 'portfolioBotAutoCreateAlerts' | 'portfolioBotAnalyzeOnHoldingChange', value: boolean) => void;
+  onNumberChange: (
+    key: keyof Pick<
+      SystemSettings,
+      'portfolioBotIntervalMinutes' | 'portfolioBotSlackRepeatMinutes' | 'portfolioBotDefaultHoldingDays' | 'portfolioBotRiskAlertThreshold' | 'portfolioBotLossAlertPct'
+    >,
+    value: string,
+  ) => void;
+}) {
+  const enabled = Boolean(settings?.portfolioBotEnabled);
+  const nextRun = latestAnalysis?.nextRunAt ? new Date(latestAnalysis.nextRunAt) : null;
+
+  return (
+    <div className="rounded-lg border border-emerald-400/15 bg-emerald-400/[0.045] p-5">
+      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <PanelTitle icon={Zap} title="Auto Mode" />
+            <Badge tone={enabled ? 'success' : 'default'}>{enabled ? 'ON' : 'OFF'}</Badge>
+            {settings?.portfolioBotAutoCreateAlerts && <Badge tone="info">Auto Alerts</Badge>}
+            {settings?.portfolioBotSlackEnabled && <Badge tone="success">Slack</Badge>}
+          </div>
+          <p className="mt-2 max-w-4xl text-sm leading-6 text-white/55">
+            Auto Mode recalculates every holding, maintains bot alerts inside the NEPSE circuit range, and sends Slack summaries on your schedule.
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2 text-xs text-white/40">
+            <span>{holdingsCount} holding{holdingsCount === 1 ? '' : 's'} tracked</span>
+            <span>Interval {settings?.portfolioBotIntervalMinutes ?? '—'} min</span>
+            <span>Slack gap {settings?.portfolioBotSlackRepeatMinutes ?? '—'} min</span>
+            <span>{nextRun ? `Next run ${nextRun.toLocaleString()}` : 'Next run waiting'}</span>
+          </div>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[430px]">
+          <Button type="button" onClick={() => onToggle(!enabled)} loading={loading} disabled={!settings}>
+            <Bot className="h-4 w-4" aria-hidden="true" />
+            {enabled ? 'Turn Off' : 'Turn On'}
+          </Button>
+          <Button type="button" variant="secondary" onClick={onRunNow} loading={analyzing} disabled={holdingsCount === 0}>
+            <Play className="h-4 w-4" aria-hidden="true" />
+            Run Now
+          </Button>
+          <Button type="button" variant="secondary" onClick={onRefresh} loading={loading}>
+            <RefreshCw className="h-4 w-4" aria-hidden="true" />
+            Refresh
+          </Button>
+        </div>
+      </div>
+
+      <div className="mt-5 grid gap-3 lg:grid-cols-3">
+        <AutomationNumberInput label="Analyze Every" unit="min" value={settings?.portfolioBotIntervalMinutes} onCommit={(value) => onNumberChange('portfolioBotIntervalMinutes', value)} />
+        <AutomationNumberInput label="Slack Repeat Gap" unit="min" value={settings?.portfolioBotSlackRepeatMinutes} onCommit={(value) => onNumberChange('portfolioBotSlackRepeatMinutes', value)} />
+        <AutomationNumberInput label="Risk Holding Frame" unit="days" value={settings?.portfolioBotDefaultHoldingDays} onCommit={(value) => onNumberChange('portfolioBotDefaultHoldingDays', value)} />
+        <AutomationNumberInput label="Risk Warning" unit="/100" value={settings?.portfolioBotRiskAlertThreshold} onCommit={(value) => onNumberChange('portfolioBotRiskAlertThreshold', value)} />
+        <AutomationNumberInput label="Loss Warning" unit="%" value={settings?.portfolioBotLossAlertPct} onCommit={(value) => onNumberChange('portfolioBotLossAlertPct', value)} />
+        <div className="grid gap-2 rounded-lg border border-white/10 bg-black/15 p-3">
+          <AutomationToggle label="Slack summaries" checked={Boolean(settings?.portfolioBotSlackEnabled)} onChange={(value) => onBooleanChange('portfolioBotSlackEnabled', value)} disabled={!settings || loading} />
+          <AutomationToggle label="Auto alerts" checked={Boolean(settings?.portfolioBotAutoCreateAlerts)} onChange={(value) => onBooleanChange('portfolioBotAutoCreateAlerts', value)} disabled={!settings || loading} />
+          <AutomationToggle label="Analyze changes" checked={Boolean(settings?.portfolioBotAnalyzeOnHoldingChange)} onChange={(value) => onBooleanChange('portfolioBotAnalyzeOnHoldingChange', value)} disabled={!settings || loading} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AutomationNumberInput({
+  label,
+  unit,
+  value,
+  onCommit,
+}: {
+  label: string;
+  unit: string;
+  value: number | undefined;
+  onCommit: (value: string) => void;
+}) {
+  return (
+    <label className="block rounded-lg border border-white/10 bg-black/15 p-3">
+      <span className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-white/35">
+        <Clock3 className="h-3 w-3" aria-hidden="true" />
+        {label}
+      </span>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+        <Input
+          key={`${label}-${value ?? ''}`}
+          type="number"
+          defaultValue={value ?? ''}
+          onBlur={(event) => onCommit(event.target.value)}
+          className="h-9"
+        />
+        <span className="text-xs text-white/40">{unit}</span>
+      </div>
+    </label>
+  );
+}
+
+function AutomationToggle({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center justify-between gap-3 rounded-md px-1 py-1 text-sm text-white/65">
+      <span>{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-4 w-4 accent-emerald-400"
+      />
+    </label>
+  );
+}
+
+function PortfolioPerformanceTable({
+  holdings,
+  report,
+  stocks,
+  loading,
+}: {
+  holdings: PortfolioHolding[];
+  report: PortfolioAnalysisReport | null;
+  stocks: PriceSummary[];
+  loading: boolean;
+}) {
+  const analysisBySymbol = new Map((report?.holdings ?? []).map((holding) => [holding.symbol, holding]));
+  const priceBySymbol = new Map(stocks.map((stock) => [stock.symbol, stock]));
+
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/15 p-5">
+      <div className="mb-4 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+        <div>
+          <PanelTitle icon={Table2} title="Portfolio Price & Performance" />
+          <p className="mt-1 text-sm text-white/45">Bot-managed holdings, live price, P/L, allocation, risk, and active action.</p>
+        </div>
+        <Badge tone={report ? 'success' : 'default'}>{report ? new Date(report.generatedAt).toLocaleTimeString() : 'Waiting'}</Badge>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="min-w-[920px] w-full border-separate border-spacing-y-2 text-left text-sm">
+          <thead className="text-[10px] uppercase tracking-wider text-white/35">
+            <tr>
+              <th className="px-3 py-1">Stock</th>
+              <th className="px-3 py-1 text-right">Qty</th>
+              <th className="px-3 py-1 text-right">Avg</th>
+              <th className="px-3 py-1 text-right">LTP</th>
+              <th className="px-3 py-1 text-right">Value</th>
+              <th className="px-3 py-1 text-right">P/L</th>
+                <th className="px-3 py-1 text-right">Alloc</th>
+                <th className="px-3 py-1">Crawler</th>
+                <th className="px-3 py-1">Bot Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && holdings.length === 0 ? (
+              <tr><td colSpan={9} className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-6 text-center text-white/40">Loading portfolio table…</td></tr>
+            ) : holdings.length === 0 ? (
+              <tr><td colSpan={9} className="rounded-lg border border-dashed border-white/10 px-3 py-8 text-center text-white/40">Add holdings to activate the portfolio table.</td></tr>
+            ) : (
+              holdings.map((holding) => {
+                const analysis = analysisBySymbol.get(holding.symbol);
+                const live = priceBySymbol.get(holding.symbol);
+                const currentPrice = analysis?.currentPrice ?? live?.price ?? holding.averageCost;
+                const value = analysis?.currentValue ?? currentPrice * holding.quantity;
+                const cost = analysis?.costBasis ?? holding.averageCost * holding.quantity;
+                const gain = analysis?.unrealizedGain ?? value - cost;
+                const gainPct = analysis?.gainPct ?? (cost > 0 ? (gain / cost) * 100 : 0);
+                const positive = gain >= 0;
+                return (
+                  <tr key={holding.id} className="group">
+                    <td className="rounded-l-lg border-y border-l border-white/10 bg-white/[0.03] px-3 py-3">
+                      <div className="font-mono font-semibold text-white">{holding.symbol}</div>
+                      <div className="max-w-52 truncate text-xs text-white/35">{analysis?.name ?? live?.name ?? holding.note ?? 'Manual holding'}</div>
+                    </td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white/75">{money(holding.quantity)}</td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white/75">Rs. {money(holding.averageCost)}</td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white">Rs. {money(currentPrice)}</td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white">Rs. {money(value)}</td>
+                    <td className={cn('border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono', positive ? 'text-emerald-300' : 'text-red-300')}>
+                      {positive ? '+' : ''}Rs. {money(gain)}<br />
+                      <span className="text-xs">{positive ? '+' : ''}{gainPct.toFixed(2)}%</span>
+                    </td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white/75">{(analysis?.allocationPct ?? 0).toFixed(2)}%</td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge tone={analysis?.crawlerVerdict === 'RISK' ? 'danger' : analysis?.crawlerVerdict === 'BULLISH' ? 'success' : analysis ? 'info' : 'default'}>
+                          {analysis?.crawlerVerdict ?? 'Pending'}
+                        </Badge>
+                        {analysis && <span className="font-mono text-xs text-white/45">{analysis.crawlerNotices}/{analysis.crawlerSources}</span>}
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-xs leading-5 text-white/35">{analysis?.crawlerSummary ?? 'Auto crawl runs with portfolio analysis.'}</p>
+                    </td>
+                    <td className="rounded-r-lg border-y border-r border-white/10 bg-white/[0.03] px-3 py-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge tone={analysis?.riskScore && analysis.riskScore >= 65 ? 'danger' : analysis?.riskScore && analysis.riskScore >= 38 ? 'warn' : 'success'}>
+                          {analysis ? `${analysis.riskScore.toFixed(0)}/100` : 'Pending'}
+                        </Badge>
+                        {analysis && <Badge tone={analysis.decision === 'AVOID' ? 'danger' : analysis.decision === 'WAIT' ? 'warn' : 'success'}>{analysis.decision.replace('_', ' ')}</Badge>}
+                      </div>
+                      <p className="mt-1 line-clamp-2 text-xs leading-5 text-white/45">{analysis?.action ?? 'Run analysis to let the bot manage this holding.'}</p>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AutomationHistoryPanel({ history, loading }: { history: PortfolioAnalysisReport[]; loading: boolean }) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/15 p-5">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <PanelTitle icon={SlidersHorizontal} title="Automation Runs" />
+        <Badge tone="default">{history.length} runs</Badge>
+      </div>
+      <div className="grid gap-2">
+        {loading && history.length === 0 ? (
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-4 text-sm text-white/40">Loading runs…</div>
+        ) : history.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-white/10 px-3 py-6 text-center text-sm text-white/40">No automation run has been recorded yet.</div>
+        ) : (
+          history.slice(0, 6).map((run) => (
+            <div key={run.id ?? run.generatedAt} className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.03] p-3 md:grid-cols-[minmax(0,1fr)_120px_120px_130px] md:items-center">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone={run.status === 'HEALTHY' ? 'success' : run.status === 'MONITOR' ? 'warn' : 'danger'}>{run.status}</Badge>
+                  <Badge tone="default">{run.reason}</Badge>
+                  {run.notifiedAt && <Badge tone="info">Slack</Badge>}
+                </div>
+                <p className="mt-1 truncate text-xs text-white/45">{new Date(run.generatedAt).toLocaleString()}</p>
+              </div>
+              <InfoPill label="Value" value={`Rs. ${money(run.currentValue)}`} />
+              <InfoPill label="P/L" value={`${run.unrealizedGain >= 0 ? '+' : ''}${run.gainPct.toFixed(2)}%`} tone={run.unrealizedGain >= 0 ? 'success' : 'danger'} />
+              <InfoPill label="Risk" value={`${run.riskScore.toFixed(0)}/100`} />
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 function BotSummary({
   selectedStock,
   finalDecision,
@@ -766,25 +1106,27 @@ function BotSummary({
 }) {
   const up = (selectedStock?.changePct ?? 0) >= 0;
   return (
-    <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_repeat(4,minmax(130px,170px))]">
-      <div className="rounded-lg border border-white/10 bg-black/20 p-5">
-        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+    <div className="grid items-start gap-3 2xl:grid-cols-[minmax(320px,1.15fr)_repeat(4,minmax(135px,0.55fr))]">
+      <div className="rounded-lg border border-white/10 bg-black/20 p-4">
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="font-mono text-3xl font-bold text-white">{selectedStock?.symbol ?? '—'}</h3>
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h3 className="font-mono text-2xl font-bold text-white sm:text-3xl">{selectedStock?.symbol ?? '—'}</h3>
               <Badge tone={finalDecision === 'Avoid Entry' ? 'danger' : finalDecision === 'Wait & Watch' ? 'warn' : 'success'}>{finalDecision}</Badge>
               {watched && <Badge tone="info">Watched</Badge>}
             </div>
-            {selectedStock?.name && selectedStock.name !== selectedStock.symbol && (
-              <p className="mt-1 truncate text-sm text-white/50">{selectedStock.name}</p>
-            )}
-            <p className="mt-4 max-w-3xl text-sm leading-6 text-white/60">
-              The bot turns scattered tools into one task flow: test the entry, explain movement, crawl evidence, compare candidates, and prepare alerts before you act.
-            </p>
+            {selectedStock?.name && selectedStock.name !== selectedStock.symbol && <p className="mt-1 truncate text-sm text-white/50">{selectedStock.name}</p>}
+            <div className="mt-3 flex flex-wrap gap-2 text-xs text-white/40">
+              <span>Risk</span>
+              <span>AI Command</span>
+              <span>Deep Crawl</span>
+              <span>Auto Alerts</span>
+              <span>Slack</span>
+            </div>
           </div>
           <div className="text-left sm:text-right">
             <div className="text-xs uppercase tracking-wider text-white/35">Live Price</div>
-            <div className="mt-1 font-mono text-3xl font-semibold text-white">
+            <div className="mt-1 whitespace-nowrap font-mono text-2xl font-semibold text-white sm:text-3xl">
               {selectedStock ? `Rs. ${money(selectedStock.price)}` : 'No Data'}
             </div>
             {selectedStock && (
@@ -892,6 +1234,9 @@ function PortfolioAnalysisPanel({ report, loading }: { report: PortfolioAnalysis
                 </div>
                 {holding.name && <p className="mt-1 truncate text-xs text-white/35">{holding.name}</p>}
                 <p className="mt-1 line-clamp-2 text-xs leading-5 text-white/45">{holding.action}</p>
+                <p className="mt-1 line-clamp-1 text-xs text-sky-200/55">
+                  Crawl {holding.crawlerVerdict} · {holding.crawlerNotices} notices · {holding.crawlerSources} sources
+                </p>
               </div>
               <InfoPill label="Allocation" value={`${holding.allocationPct.toFixed(2)}%`} />
               <InfoPill label="Risk" value={`${holding.riskScore.toFixed(0)}/100`} />
@@ -1108,7 +1453,7 @@ function Metric({
   tone: Tone;
 }) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+    <div className="min-h-[116px] rounded-lg border border-white/10 bg-white/[0.03] p-4">
       <div className="mb-2 flex items-center justify-between gap-2">
         <span className="truncate text-xs uppercase tracking-wider text-white/35">{label}</span>
         <Icon
@@ -1119,7 +1464,7 @@ function Metric({
           aria-hidden="true"
         />
       </div>
-      <div className="truncate font-mono text-xl font-semibold tabular-nums text-white">{value}</div>
+      <div className="truncate font-mono text-lg font-semibold tabular-nums text-white sm:text-xl">{value}</div>
     </div>
   );
 }
