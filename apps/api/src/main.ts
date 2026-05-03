@@ -12,6 +12,16 @@ function splitOrigins(value?: string | null): string[] {
 }
 
 /**
+ * Origins that are always allowed regardless of env config. The Vercel
+ * preview/prod domains live here so a misconfigured FRONTEND_URL on the
+ * deployed API doesn't take down the production frontend.
+ */
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://trade-ping-web.vercel.app',
+  'https://*.vercel.app',
+];
+
+/**
  * Match an incoming origin against an allowlist entry. Entries may be exact
  * origins (`https://app.example.com`) or contain a single `*` for subdomain
  * wildcards (`https://*.vercel.app`). Hostname matching is case-insensitive.
@@ -99,6 +109,7 @@ async function bootstrap() {
       if (!origin) return callback(null, true);
 
       const allowedOrigins = [
+        ...DEFAULT_ALLOWED_ORIGINS,
         ...splitOrigins(process.env.FRONTEND_URL),
         ...splitOrigins(settings.get().frontendUrl),
       ];
@@ -110,7 +121,11 @@ async function bootstrap() {
       // In development, allow Next/Vite/etc. to move to any local or LAN port.
       if (isLocalDevOrigin(origin)) return callback(null, true);
 
-      callback(new Error(`CORS: origin not allowed — ${origin}`));
+      // Deny without throwing — the cors middleware will respond cleanly so
+      // browsers see a proper preflight response (no allow-origin header) and
+      // we avoid 500s + ExceptionsHandler log spam.
+      logger.warn(`CORS: origin not allowed — ${origin}`);
+      callback(null, false);
     },
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],

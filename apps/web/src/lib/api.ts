@@ -113,10 +113,90 @@ export interface PriceSummary {
   timestamp: string;
 }
 
+export interface PreviewPrice {
+  symbol: string;
+  price: number;
+  change: number;
+  changePct: number;
+  sector: string;
+  source: 'LIVE' | 'MOCK';
+  timestamp: string;
+}
+
 export interface PricePoint {
   timestamp: string;
   price: number;
 }
+
+export type CrawlStepStatus = 'pending' | 'running' | 'done' | 'warning' | 'error';
+
+export interface CrawlPredictionStep {
+  id: string;
+  label: string;
+  source?: string;
+  url?: string;
+  status: CrawlStepStatus;
+  detail: string;
+  durationMs?: number;
+}
+
+export interface CrawlSourceConfig {
+  id: string;
+  label: string;
+  source: string;
+  url: string;
+  custom?: boolean;
+}
+
+export interface CrawlSourceReport {
+  id: string;
+  source: string;
+  url: string;
+  status: CrawlStepStatus;
+  noticesFound: number;
+  bytesRead: number;
+  attempts: number;
+  durationMs: number;
+  error?: string;
+}
+
+export interface CrawlNotice {
+  source: string;
+  title: string;
+  url?: string;
+  snippet: string;
+  matchedSymbols: string[];
+  sentiment: 'positive' | 'neutral' | 'negative';
+}
+
+export interface StockPrediction {
+  symbol: string;
+  verdict: 'BULLISH' | 'WATCH' | 'NEUTRAL' | 'RISK';
+  confidence: number;
+  score: number;
+  price?: number;
+  changePct?: number;
+  volume?: number;
+  turnover?: number;
+  sector?: string;
+  notices: CrawlNotice[];
+  reasons: string[];
+}
+
+export interface CrawlPredictionReport {
+  requestedSymbols: string[];
+  generatedAt: string;
+  steps: CrawlPredictionStep[];
+  predictions: StockPrediction[];
+  summary: string;
+  mode?: 'single' | 'comparison' | 'batch';
+  winner?: string;
+  sources: CrawlSourceConfig[];
+  sourceReports: CrawlSourceReport[];
+}
+
+export type UserRole = string;
+export type UserStatus = 'ACTIVE' | 'SUSPENDED' | 'INVITED';
 
 export interface AuthUser {
   id: string;
@@ -124,6 +204,55 @@ export interface AuthUser {
   email: string;
   name: string;
   picture: string | null;
+  role: UserRole;
+  status?: UserStatus;
+  permissions?: string[];
+}
+
+export interface AdminUser {
+  id: string;
+  email: string;
+  name: string;
+  picture: string | null;
+  role: string;
+  status: UserStatus;
+  permissionsGrant: string[];
+  permissionsRevoke: string[];
+  effectivePermissions: string[];
+  lastLoginAt: string | null;
+  invitedBy: string | null;
+  invitedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RoleSummary {
+  key: string;
+  name: string;
+  description: string | null;
+  isSystem: boolean;
+  rank: number;
+  permissions: string[];
+  userCount: number;
+}
+
+export interface PermissionDef {
+  key: string;
+  label: string;
+  group: string;
+  description: string;
+}
+
+export interface RolesResponse {
+  catalog: PermissionDef[];
+  roles: RoleSummary[];
+}
+
+export interface UserStatsResponse {
+  total: number;
+  activeLast7Days: number;
+  byStatus: Record<string, number>;
+  byRole: Record<string, number>;
 }
 
 export interface AuthSession {
@@ -220,8 +349,28 @@ export const api = {
     request<ApiResponse<{ id: string }>>(`/alerts/${id}`, { method: 'DELETE' }),
   logs: () => request<ApiResponse<CrawlerLog[]>>('/logs'),
   prices: () => request<ApiResponse<PriceSummary[]>>('/crawler/prices'),
+  pricesPreview: (limit = 10) =>
+    request<ApiResponse<PreviewPrice[]>>(`/crawler/prices/preview?limit=${limit}`, { retries: 1, timeoutMs: 6000 }),
   priceHistory: (symbol: string, range: '1d' | '5d' | '1mo' = '1d') =>
     request<ApiResponse<PricePoint[]>>(`/crawler/prices/${encodeURIComponent(symbol)}/history?range=${range}`),
+  predictStocks: (symbols: string[], sourceIds?: string[], customSources?: { label?: string; url: string }[]) =>
+    request<ApiResponse<CrawlPredictionReport>>('/crawler/predict', {
+      method: 'POST',
+      body: JSON.stringify({ symbols, sourceIds, customSources }),
+      timeoutMs: 120_000,
+    }),
+  predictStock: (symbol: string, sourceIds?: string[], customSources?: { label?: string; url: string }[]) =>
+    request<ApiResponse<CrawlPredictionReport>>('/crawler/predict/single', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, sourceIds, customSources }),
+      timeoutMs: 120_000,
+    }),
+  compareStocks: (symbols: string[], sourceIds?: string[], customSources?: { label?: string; url: string }[]) =>
+    request<ApiResponse<CrawlPredictionReport>>('/crawler/compare', {
+      method: 'POST',
+      body: JSON.stringify({ symbols, sourceIds, customSources }),
+      timeoutMs: 180_000,
+    }),
   refreshPrices: () =>
     request<ApiResponse<PriceSummary[]>>('/crawler/prices/refresh', { method: 'POST', timeoutMs: 30_000 }),
   runCheck: () => request<ApiResponse<{ count: number }>>('/crawler/check', { method: 'POST', timeoutMs: 30_000 }),
@@ -230,8 +379,20 @@ export const api = {
   getSettings: () => request<ApiResponse<SystemSettings>>('/settings'),
   updateSettings: (patch: Partial<Omit<SystemSettings, 'port'>>) =>
     request<ApiResponse<SystemSettings>>('/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
-  testNotification: (channel: 'slack' | 'whatsapp') =>
-    request<ApiResponse<{ ok: boolean; error?: string }>>(`/notifications/test/${channel}`, { method: 'POST' }),
+  testNotification: (
+    channel: 'slack' | 'whatsapp',
+    body: {
+      slackWebhookUrl?: string;
+      whatsappAccountSid?: string;
+      whatsappAuthToken?: string;
+      whatsappFromNumber?: string;
+      whatsappPhone?: string;
+    } = {},
+  ) =>
+    request<ApiResponse<{ ok: boolean; error?: string }>>(`/notifications/test/${channel}`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   // ── Watchlists ───────────────────────────────────────────────────────────
   listWatchlists: () => request<ApiResponse<Watchlist[]>>('/watchlists'),
   createWatchlist: (name: string) =>
@@ -290,6 +451,51 @@ export const api = {
       `/database/tables/${encodeURIComponent(name)}/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
     ),
+  // ── Admin: users ────────────────────────────────────────────────────────
+  listAdminUsers: (opts: { search?: string; role?: string; status?: UserStatus; page?: number; limit?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.search) params.set('search', opts.search);
+    if (opts.role) params.set('role', opts.role);
+    if (opts.status) params.set('status', opts.status);
+    if (opts.page) params.set('page', String(opts.page));
+    if (opts.limit) params.set('limit', String(opts.limit));
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return request<{ success: boolean; data: AdminUser[]; meta: { total: number; page: number; limit: number } }>(
+      `/admin/users${qs}`,
+    );
+  },
+  getAdminUserStats: () => request<ApiResponse<UserStatsResponse>>('/admin/users/stats'),
+  getAdminUser: (id: string) => request<ApiResponse<AdminUser>>(`/admin/users/${encodeURIComponent(id)}`),
+  updateAdminUser: (id: string, body: { role?: string; status?: UserStatus; name?: string }) =>
+    request<ApiResponse<AdminUser>>(`/admin/users/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  setAdminUserPermissions: (id: string, body: { grants?: string[]; revokes?: string[] }) =>
+    request<ApiResponse<AdminUser>>(`/admin/users/${encodeURIComponent(id)}/permissions`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  inviteAdminUser: (body: { email: string; role?: string; name?: string }) =>
+    request<ApiResponse<AdminUser>>('/admin/users/invite', { method: 'POST', body: JSON.stringify(body) }),
+  deleteAdminUser: (id: string) =>
+    request<ApiResponse<{ id: string }>>(`/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ── Admin: roles ────────────────────────────────────────────────────────
+  listAdminRoles: () => request<ApiResponse<RolesResponse>>('/admin/roles'),
+  createAdminRole: (body: { key: string; name: string; description?: string; permissions?: string[]; rank?: number }) =>
+    request<ApiResponse<RoleSummary>>('/admin/roles', { method: 'POST', body: JSON.stringify(body) }),
+  updateAdminRole: (
+    key: string,
+    body: { name?: string; description?: string; permissions?: string[]; rank?: number },
+  ) =>
+    request<ApiResponse<RoleSummary>>(`/admin/roles/${encodeURIComponent(key)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteAdminRole: (key: string) =>
+    request<ApiResponse<{ key: string }>>(`/admin/roles/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+
   bulkDeleteDbRows: (name: string, ids: string[]) =>
     request<ApiResponse<{ deleted: number }>>(
       `/database/tables/${encodeURIComponent(name)}/bulk-delete`,
@@ -407,6 +613,7 @@ export interface NotificationChannelInput {
 export type DbColumnType = 'string' | 'number' | 'boolean' | 'datetime' | 'json' | 'string[]';
 
 export interface DbColumn {
+  adminOnly?: boolean;
   name: string;
   type: DbColumnType;
   isId?: boolean;

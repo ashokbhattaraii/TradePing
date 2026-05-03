@@ -17,9 +17,12 @@ import {
   Gauge,
   LayoutDashboard,
   LogOut,
+  Radar,
   RefreshCw,
   Search,
   Settings2,
+  Shield,
+  ShieldCheck,
   SlidersHorizontal,
   Target,
   Terminal,
@@ -40,6 +43,10 @@ import { HowItWorks } from './how-it-works';
 import { StockPrices } from './stock-prices';
 import { SettingsPanel } from './settings-panel';
 import { DatabasePanel } from './database-panel';
+import { UsersPanel } from './users-panel';
+import { RolesPanel } from './roles-panel';
+import { CrawlerPredictionPanel } from './crawler-prediction-panel';
+import { hasAnyPermission } from '@/lib/permissions';
 import { WatchlistPanel } from './watchlist-panel';
 import { ToastProvider, useToast } from './ui/toast';
 import { ConnectionBanner } from './connection-banner';
@@ -55,19 +62,33 @@ import { api, type PriceSummary } from '@/lib/api';
 import { getSector } from '@/lib/sectors';
 import { cn } from '@/lib/utils';
 
-type ViewId = 'overview' | 'market' | 'alerts' | 'watchlist' | 'activity' | 'database' | 'guide' | 'settings';
+type ViewId =
+  | 'overview'
+  | 'market'
+  | 'crawler'
+  | 'alerts'
+  | 'watchlist'
+  | 'activity'
+  | 'users'
+  | 'roles'
+  | 'database'
+  | 'guide'
+  | 'settings';
 type GlobalFilter = 'all' | 'gainers' | 'losers' | 'live' | 'active' | 'triggered' | 'errors';
 
 const views = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'market', label: 'Live Prices', icon: ChartNoAxesCombined },
-  { id: 'alerts', label: 'Alerts', icon: Bell },
-  { id: 'watchlist', label: 'Watchlists', icon: BookMarked },
-  { id: 'activity', label: 'Activity', icon: Terminal },
-  { id: 'database', label: 'Database', icon: Database },
-  { id: 'guide', label: 'Guide', icon: BookOpen },
-  { id: 'settings', label: 'Settings', icon: Settings2 },
-] satisfies { id: ViewId; label: string; icon: LucideIcon }[];
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard, requires: [] },
+  { id: 'market', label: 'Live Prices', icon: ChartNoAxesCombined, requires: [] },
+  { id: 'crawler', label: 'Crawler', icon: Radar, requires: [] },
+  { id: 'alerts', label: 'Alerts', icon: Bell, requires: [] },
+  { id: 'watchlist', label: 'Watchlists', icon: BookMarked, requires: [] },
+  { id: 'activity', label: 'Activity', icon: Terminal, requires: [] },
+  { id: 'users', label: 'Users', icon: Shield, requires: ['users.read'] },
+  { id: 'roles', label: 'Roles', icon: ShieldCheck, requires: ['roles.read'] },
+  { id: 'database', label: 'Database', icon: Database, requires: ['database.access'] },
+  { id: 'guide', label: 'Guide', icon: BookOpen, requires: [] },
+  { id: 'settings', label: 'Settings', icon: Settings2, requires: [] },
+] satisfies { id: ViewId; label: string; icon: LucideIcon; requires: string[] }[];
 
 const viewIds = new Set<ViewId>(views.map((view) => view.id));
 
@@ -92,6 +113,10 @@ export function Dashboard() {
 function DashboardInner() {
   const toast = useToast();
   const { user, signOut } = useAuth();
+  const visibleViews = useMemo(
+    () => views.filter((v) => v.requires.length === 0 || hasAnyPermission(user, v.requires)),
+    [user],
+  );
   const [activeView, setActiveView] = useState<ViewId>('overview');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<GlobalFilter>('all');
@@ -301,6 +326,14 @@ function DashboardInner() {
                   <UserCircle className="h-5 w-5 text-white/45" aria-hidden="true" />
                 )}
                 <span className="truncate text-xs font-medium text-white/65">{user.email}</span>
+                {user.role === 'ADMIN' && (
+                  <span
+                    className="shrink-0 rounded-full bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-200"
+                    title="Administrator"
+                  >
+                    Admin
+                  </span>
+                )}
               </div>
               <button
                 type="button"
@@ -382,7 +415,7 @@ function DashboardInner() {
       <div className="grid w-full gap-0 lg:h-[calc(100vh-65px)] lg:grid-cols-[248px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)]">
         <aside className="border-b border-white/10 px-4 py-3 sm:px-6 lg:border-b-0 lg:border-r lg:px-4 lg:py-6 xl:px-5">
           <nav aria-label="Dashboard sections" className="flex gap-2 overflow-x-auto lg:flex-col lg:overflow-visible">
-            {views.map((view) => {
+            {visibleViews.map((view) => {
               const Icon = view.icon;
               const active = activeView === view.id;
               return (
@@ -482,6 +515,8 @@ function DashboardInner() {
             />
           )}
 
+          {activeView === 'crawler' && <CrawlerPredictionPanel symbols={liveSymbols} />}
+
           {activeView === 'alerts' && (
             <div className="grid gap-5 xl:grid-cols-[minmax(360px,0.7fr)_minmax(0,1fr)]">
               <div className="grid content-start gap-5">
@@ -528,6 +563,10 @@ function DashboardInner() {
               onListsChange={setWatchlists}
             />
           )}
+
+          {activeView === 'users' && <UsersPanel />}
+
+          {activeView === 'roles' && <RolesPanel />}
 
           {activeView === 'database' && <DatabasePanel />}
 

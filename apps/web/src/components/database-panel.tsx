@@ -28,6 +28,7 @@ import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Input, Select } from './ui/input';
 import { useToast } from './ui/toast';
+import { useAuth } from './auth-provider';
 import { cn } from '@/lib/utils';
 
 const PAGE_SIZES = [10, 25, 50, 100];
@@ -36,6 +37,8 @@ type RowMap = Record<string, unknown>;
 
 export function DatabasePanel() {
   const toast = useToast();
+  const { user } = useAuth();
+  const isAdmin = user.role === 'ADMIN';
   const [tables, setTables] = useState<DbTableSummary[]>([]);
   const [stats, setStats] = useState<Record<string, number>>({});
   const [activeName, setActiveName] = useState<string | null>(null);
@@ -221,9 +224,18 @@ export function DatabasePanel() {
             <Database className="h-4 w-4 text-cyan-300" aria-hidden="true" />
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-white">Database Browser</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-white">Database Browser</h3>
+              {isAdmin && (
+                <span className="rounded-full bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-200">
+                  Admin
+                </span>
+              )}
+            </div>
             <p className="text-xs text-white/40">
-              Inspect, sort, edit, export, and bulk-manage records directly from PostgreSQL.
+              {isAdmin
+                ? 'Full access — view, edit, and manage every user’s data across all tables.'
+                : 'Inspect, sort, edit, export, and bulk-manage your own records.'}
             </p>
           </div>
         </div>

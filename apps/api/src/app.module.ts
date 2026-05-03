@@ -11,6 +11,7 @@ import { WatchlistModule } from './watchlist/watchlist.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './auth/auth.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { AuthModule } from './auth/auth.module';
     WatchlistModule,
     NotificationsModule,
     DatabaseModule,
+    AdminModule,
   ],
 })
 export class AppModule {}

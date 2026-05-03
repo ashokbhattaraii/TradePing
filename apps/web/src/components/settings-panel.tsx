@@ -577,9 +577,18 @@ export function SettingsPanel() {
   const testChannel = async (channel: 'slack' | 'whatsapp') => {
     const setState = channel === 'slack' ? setSlackTestState : setWaTestState;
     const setMsg = channel === 'slack' ? setSlackTestMsg : setWaTestMsg;
+    const body =
+      channel === 'slack'
+        ? { slackWebhookUrl: getText('slackWebhookUrl') }
+        : {
+            whatsappAccountSid: getText('whatsappAccountSid'),
+            whatsappAuthToken: getText('whatsappAuthToken'),
+            whatsappFromNumber: getText('whatsappFromNumber'),
+            whatsappPhone: getText('whatsappPhone'),
+          };
     setState('testing');
     try {
-      const res = await api.testNotification(channel);
+      const res = await api.testNotification(channel, body);
       setState(res.data.ok ? 'ok' : 'error');
       setMsg(res.data.error ?? '');
     } catch (err) {

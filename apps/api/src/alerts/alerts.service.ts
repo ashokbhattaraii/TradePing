@@ -137,17 +137,17 @@ export class AlertsService {
     });
     this.logs.info(`Alert created for ${row.symbol} ${row.condition} Rs. ${row.targetPrice}`);
     const alert = toAlert(row);
-    if (rules.notifyOnCreate || (await this.notifications.hasEnabledRulesForEvent('alert.created', userId))) {
-      void this.notifications.notifyAlertCreated(alert);
-    }
+    void this.notifications.notifyAlertCreated(alert);
     return alert;
   }
 
   async remove(id: string, userId: string): Promise<{ id: string }> {
     const row = await this.prisma.alert.findFirst({ where: { id, userId } });
     if (!row) throw new NotFoundException(`Alert ${id} not found`);
+    const alert = toAlert(row);
     await this.prisma.alert.delete({ where: { id } });
     this.logs.info(`Alert removed for ${row.symbol}`);
+    void this.notifications.notifyAlertClosed(alert);
     return { id };
   }
 
@@ -200,13 +200,11 @@ export class AlertsService {
     if (rules.expiryHours > 0) {
       const cutoff = new Date(now.getTime() - rules.expiryHours * 3_600_000);
 
-      if (rules.notifyOnExpiry || (await this.notifications.hasEnabledRulesForEvent('alert.expired', userId))) {
-        const expired = await this.prisma.alert.findMany({
-          where: { ...ownerWhere, status: 'ACTIVE', createdAt: { lt: cutoff } },
-        });
-        for (const row of expired) {
-          void this.notifications.notifyAlertExpired(toAlert(row));
-        }
+      const expired = await this.prisma.alert.findMany({
+        where: { ...ownerWhere, status: 'ACTIVE', createdAt: { lt: cutoff } },
+      });
+      for (const row of expired) {
+        void this.notifications.notifyAlertExpired(toAlert(row));
       }
 
       await this.prisma.alert.deleteMany({

@@ -1,25 +1,36 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import type { AuthUser } from '../auth/auth.types';
-import { DatabaseService } from './database.service';
+import { RequirePermissions } from '../auth/permissions.decorator';
+import { WILDCARD_PERMISSION } from '../auth/permissions.catalog';
+import { DatabaseService, type DbCaller } from './database.service';
 
+function toCaller(user: AuthUser): DbCaller {
+  const perms = new Set(user.permissions ?? []);
+  return {
+    id: user.id,
+    isAdmin: perms.has(WILDCARD_PERMISSION) || perms.has('database.access'),
+  };
+}
+
+@RequirePermissions('database.access')
 @Controller('database')
 export class DatabaseController {
   constructor(private readonly db: DatabaseService) {}
 
   @Get('tables')
-  listTables() {
-    return { success: true, data: this.db.listTables() };
+  listTables(@CurrentUser() user: AuthUser) {
+    return { success: true, data: this.db.listTables(toCaller(user)) };
   }
 
   @Get('stats')
   async stats(@CurrentUser() user: AuthUser) {
-    return { success: true, data: await this.db.stats(user.id) };
+    return { success: true, data: await this.db.stats(toCaller(user)) };
   }
 
   @Get('tables/:name/schema')
-  schema(@Param('name') name: string) {
-    return { success: true, data: this.db.getTableMeta(name) };
+  schema(@Param('name') name: string, @CurrentUser() user: AuthUser) {
+    return { success: true, data: this.db.getTableMeta(name, toCaller(user)) };
   }
 
   @Get('tables/:name')
@@ -32,7 +43,7 @@ export class DatabaseController {
     @Query('sortDir') sortDir?: 'asc' | 'desc',
     @CurrentUser() user?: AuthUser,
   ) {
-    const result = await this.db.list(name, user!.id, {
+    const result = await this.db.list(name, toCaller(user!), {
       page: Number(page) || 1,
       limit: Number(limit) || 50,
       search: search?.trim() || undefined,
@@ -54,7 +65,7 @@ export class DatabaseController {
     @Query('sortDir') sortDir?: 'asc' | 'desc',
     @CurrentUser() user?: AuthUser,
   ) {
-    const { rows, table } = await this.db.export(name, user!.id, {
+    const { rows, table } = await this.db.export(name, toCaller(user!), {
       search: search?.trim() || undefined,
       sortField,
       sortDir,
@@ -63,8 +74,12 @@ export class DatabaseController {
   }
 
   @Post('tables/:name')
-  async create(@Param('name') name: string, @Body() body: Record<string, unknown>, @CurrentUser() user: AuthUser) {
-    const row = await this.db.create(name, body, user.id);
+  async create(
+    @Param('name') name: string,
+    @Body() body: Record<string, unknown>,
+    @CurrentUser() user: AuthUser,
+  ) {
+    const row = await this.db.create(name, body, toCaller(user));
     return { success: true, data: row };
   }
 
@@ -75,17 +90,21 @@ export class DatabaseController {
     @Body() body: Record<string, unknown>,
     @CurrentUser() user: AuthUser,
   ) {
-    const row = await this.db.update(name, id, body, user.id);
+    const row = await this.db.update(name, id, body, toCaller(user));
     return { success: true, data: row };
   }
 
   @Delete('tables/:name/:id')
   async remove(@Param('name') name: string, @Param('id') id: string, @CurrentUser() user: AuthUser) {
-    return { success: true, data: await this.db.remove(name, id, user.id) };
+    return { success: true, data: await this.db.remove(name, id, toCaller(user)) };
   }
 
   @Post('tables/:name/bulk-delete')
-  async bulkDelete(@Param('name') name: string, @Body() body: { ids: string[] }, @CurrentUser() user: AuthUser) {
-    return { success: true, data: await this.db.removeMany(name, body?.ids ?? [], user.id) };
+  async bulkDelete(
+    @Param('name') name: string,
+    @Body() body: { ids: string[] },
+    @CurrentUser() user: AuthUser,
+  ) {
+    return { success: true, data: await this.db.removeMany(name, body?.ids ?? [], toCaller(user)) };
   }
 }

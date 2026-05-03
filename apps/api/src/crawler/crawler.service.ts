@@ -39,6 +39,78 @@ export interface PriceSummary {
   timestamp: string;
 }
 
+export type CrawlStepStatus = 'pending' | 'running' | 'done' | 'warning' | 'error';
+
+export interface CrawlStep {
+  id: string;
+  label: string;
+  source?: string;
+  url?: string;
+  status: CrawlStepStatus;
+  detail: string;
+  durationMs?: number;
+}
+
+export interface CrawlNotice {
+  source: string;
+  title: string;
+  url?: string;
+  snippet: string;
+  matchedSymbols: string[];
+  sentiment: 'positive' | 'neutral' | 'negative';
+}
+
+export interface StockPrediction {
+  symbol: string;
+  verdict: 'BULLISH' | 'WATCH' | 'NEUTRAL' | 'RISK';
+  confidence: number;
+  score: number;
+  price?: number;
+  changePct?: number;
+  volume?: number;
+  turnover?: number;
+  sector?: string;
+  notices: CrawlNotice[];
+  reasons: string[];
+}
+
+export interface CrawlPredictionReport {
+  requestedSymbols: string[];
+  generatedAt: string;
+  steps: CrawlStep[];
+  predictions: StockPrediction[];
+  summary: string;
+  mode?: 'single' | 'comparison' | 'batch';
+  winner?: string;
+  sources: CrawlSourceConfig[];
+  sourceReports: CrawlSourceReport[];
+}
+
+export interface CrawlSourceConfig {
+  id: string;
+  label: string;
+  source: string;
+  url: string;
+  custom?: boolean;
+}
+
+export interface CrawlSourceReport {
+  id: string;
+  source: string;
+  url: string;
+  status: CrawlStepStatus;
+  noticesFound: number;
+  bytesRead: number;
+  attempts: number;
+  durationMs: number;
+  error?: string;
+}
+
+export interface CustomCrawlSource {
+  label?: string;
+  url: string;
+}
+
 @Injectable()
 export class CrawlerService implements OnModuleInit, OnModuleDestroy {
   private intervalHandle: NodeJS.Timeout | null = null;
@@ -105,6 +177,410 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
       select: { timestamp: true, price: true },
     });
     return rows.map((r) => ({ timestamp: r.timestamp.toISOString(), price: r.price }));
+  }
+
+  async analyzeSingleStock(
+    rawSymbol: string,
+    sourceIds?: string[],
+    customSources?: CustomCrawlSource[],
+  ): Promise<CrawlPredictionReport> {
+    const symbol = this.normalizeSymbols([rawSymbol])[0];
+    return this.analyzeStocks(symbol ? [symbol] : [], 'single', sourceIds, customSources);
+  }
+
+  async compareStocks(
+    rawSymbols: string[],
+    sourceIds?: string[],
+    customSources?: CustomCrawlSource[],
+  ): Promise<CrawlPredictionReport> {
+    const symbols = this.normalizeSymbols(rawSymbols).slice(0, 8);
+    const steps: CrawlStep[] = [];
+    const predictions: StockPrediction[] = [];
+    const sourceReports: CrawlSourceReport[] = [];
+    const selectedSources = this.selectSourceConfigs(symbols[0], sourceIds, customSources);
+
+    for (const [index, symbol] of symbols.entries()) {
+      const startedAt = Date.now();
+      const step: CrawlStep = {
+        id: `compare-${symbol}`,
+        label: `Crawl ${symbol}`,
+        status: 'running',
+        detail: `Analyzing stock ${index + 1} of ${symbols.length}.`,
+      };
+      steps.push(step);
+
+      const report = await this.analyzeStocks([symbol], 'single', sourceIds, customSources);
+      predictions.push(...report.predictions);
+      sourceReports.push(...report.sourceReports);
+      steps.push(...report.steps.map((item) => ({ ...item, id: `${symbol}-${item.id}`, label: `${symbol}: ${item.label}` })));
+      step.status = 'done';
+      step.detail = `${symbol} crawl completed.`;
+      step.durationMs = Date.now() - startedAt;
+    }
+
+    const ranked = predictions.sort((a, b) => b.score - a.score);
+    const winner = ranked[0]?.symbol;
+    const summary = winner
+      ? `${winner} ranks strongest across the comparison with a score of ${ranked[0].score}.`
+      : 'No symbols were available for comparison.';
+
+    this.logs.info(`Crawler comparison completed for ${symbols.join(', ') || 'no symbols'}`);
+
+    return {
+      requestedSymbols: symbols,
+      generatedAt: new Date().toISOString(),
+      steps,
+      predictions: ranked,
+      summary,
+      mode: 'comparison',
+      winner,
+      sources: selectedSources,
+      sourceReports,
+    };
+  }
+
+  async analyzeStocks(
+    rawSymbols: string[],
+    mode: 'single' | 'comparison' | 'batch' = 'batch',
+    sourceIds?: string[],
+    customSources?: CustomCrawlSource[],
+  ): Promise<CrawlPredictionReport> {
+    const symbols = this.normalizeSymbols(rawSymbols).slice(0, 12);
+
+    const steps: CrawlStep[] = [];
+    const completeStep = (step: CrawlStep, status: CrawlStepStatus, detail: string, startedAt: number) => {
+      step.status = status;
+      step.detail = detail;
+      step.durationMs = Date.now() - startedAt;
+    };
+
+    const normalizeStarted = Date.now();
+    const normalizeStep: CrawlStep = {
+      id: 'normalize-symbols',
+      label: 'Normalize symbols',
+      status: 'running',
+      detail: 'Cleaning aliases and removing duplicate stock symbols.',
+    };
+    steps.push(normalizeStep);
+    completeStep(normalizeStep, symbols.length ? 'done' : 'warning', `${symbols.length} symbol${symbols.length === 1 ? '' : 's'} queued.`, normalizeStarted);
+
+    const priceStarted = Date.now();
+    const priceStep: CrawlStep = {
+      id: 'market-snapshot',
+      label: 'Read live market snapshot',
+      source: 'ShareSansar',
+      url: SHARESANSAR_URL,
+      status: 'running',
+      detail: 'Reading latest price, change, volume, and turnover from the crawler cache.',
+    };
+    steps.push(priceStep);
+    if (this.priceCache.size === 0) {
+      await this.prefetch();
+    }
+    const prices = this.getLatestPrices();
+    completeStep(priceStep, prices.length ? 'done' : 'warning', `${prices.length} live price rows available.`, priceStarted);
+
+    const sourceConfigs = this.selectSourceConfigs(symbols[0], sourceIds, customSources);
+    const sourceReports: CrawlSourceReport[] = [];
+    this.logs.info(
+      `Prediction crawl started for ${symbols.join(', ') || 'no symbols'} using ${sourceConfigs.length} source${sourceConfigs.length === 1 ? '' : 's'}`,
+    );
+
+    const crawled = await Promise.all(
+      sourceConfigs.map(async (source) => {
+        const startedAt = Date.now();
+        const step: CrawlStep = {
+          id: source.id,
+          label: source.label,
+          source: source.source,
+          url: source.url,
+          status: 'running',
+          detail: `Scanning ${source.source} for related notices.`,
+        };
+        steps.push(step);
+        try {
+          this.logs.info(`Prediction crawl source started: ${source.source} (${source.url})`);
+          const fetchResult = await this.fetchTextWithRetry(source.url, 12_000, 2);
+          const html = fetchResult.text;
+          const notices = this.extractRelatedNotices(html, source.source, source.url, symbols);
+          completeStep(
+            step,
+            notices.length ? 'done' : 'warning',
+            notices.length
+              ? `${notices.length} related notice${notices.length === 1 ? '' : 's'} found after ${fetchResult.attempts} attempt${fetchResult.attempts === 1 ? '' : 's'}.`
+              : `Crawled ${fetchResult.bytesRead.toLocaleString('en-US')} bytes after ${fetchResult.attempts} attempt${fetchResult.attempts === 1 ? '' : 's'}, but no symbol-specific notice was found.`,
+            startedAt,
+          );
+          sourceReports.push({
+            id: source.id,
+            source: source.source,
+            url: source.url,
+            status: notices.length ? 'done' : 'warning',
+            noticesFound: notices.length,
+            bytesRead: fetchResult.bytesRead,
+            attempts: fetchResult.attempts,
+            durationMs: Date.now() - startedAt,
+          });
+          this.logs.info(`Prediction crawl source completed: ${source.source} (${notices.length} notices)`);
+          return notices;
+        } catch (err) {
+          const message = (err as Error).message || 'Source crawl failed.';
+          completeStep(step, 'error', `${message}. Retried and skipped this source.`, startedAt);
+          sourceReports.push({
+            id: source.id,
+            source: source.source,
+            url: source.url,
+            status: 'error',
+            noticesFound: 0,
+            bytesRead: 0,
+            attempts: 3,
+            durationMs: Date.now() - startedAt,
+            error: message,
+          });
+          this.logs.warn(`Prediction crawl source failed after retries: ${source.source} (${message})`);
+          return [] as CrawlNotice[];
+        }
+      }),
+    );
+
+    const notices = crawled.flat();
+    const scoreStarted = Date.now();
+    const scoreStep: CrawlStep = {
+      id: 'score-predictions',
+      label: 'Score predictions',
+      status: 'running',
+      detail: 'Combining price momentum, liquidity, and notice sentiment.',
+    };
+    steps.push(scoreStep);
+    const predictions = symbols.map((symbol) => this.predictSymbol(symbol, prices, notices));
+    completeStep(scoreStep, 'done', `Generated ${predictions.length} prediction${predictions.length === 1 ? '' : 's'}.`, scoreStarted);
+
+    const strongest = [...predictions].sort((a, b) => b.score - a.score)[0];
+    const summary = strongest
+      ? `${strongest.symbol} has the strongest current setup (${strongest.verdict}, ${strongest.confidence}% confidence).`
+      : 'No symbols were available for prediction.';
+
+    this.logs.info(`Crawler prediction completed for ${symbols.join(', ') || 'no symbols'}`);
+
+    return {
+      requestedSymbols: symbols,
+      generatedAt: new Date().toISOString(),
+      steps,
+      predictions,
+      summary,
+      mode,
+      winner: strongest?.symbol,
+      sources: sourceConfigs,
+      sourceReports,
+    };
+  }
+
+  private normalizeSymbols(rawSymbols: string[]): string[] {
+    return Array.from(
+      new Set(
+        rawSymbols
+          .map((symbol) => (STOCK_ALIASES[symbol] ?? symbol).replace(/[^A-Za-z0-9]/g, '').toUpperCase())
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  private selectSourceConfigs(
+    symbol?: string,
+    sourceIds?: string[],
+    customSources?: CustomCrawlSource[],
+  ): CrawlSourceConfig[] {
+    const configs = [...this.stockSourceConfigs(symbol), ...this.customSourceConfigs(customSources)];
+    const selected = new Set((sourceIds ?? []).filter(Boolean));
+    const filtered = selected.size ? configs.filter((source) => selected.has(source.id)) : configs;
+    return filtered.length ? filtered : configs;
+  }
+
+  private customSourceConfigs(customSources?: CustomCrawlSource[]): CrawlSourceConfig[] {
+    const configs: CrawlSourceConfig[] = [];
+    for (const source of (customSources ?? []).slice(0, 6)) {
+      try {
+        const url = new URL(source.url.trim());
+        if (url.protocol !== 'http:' && url.protocol !== 'https:') continue;
+        const host = url.hostname.replace(/^www\./, '');
+        configs.push({
+          id: `custom-${host.replace(/[^a-z0-9]/gi, '-').toLowerCase()}`,
+          label: source.label?.trim() || `Crawl ${host}`,
+          source: source.label?.trim() || host,
+          url: url.toString(),
+          custom: true,
+        });
+      } catch {
+        continue;
+      }
+    }
+    return configs;
+  }
+
+  private stockSourceConfigs(symbol?: string): CrawlSourceConfig[] {
+    const query = encodeURIComponent(symbol ?? 'nepse');
+    return [
+      {
+        id: 'sharesansar-announcements',
+        label: 'Crawl ShareSansar announcements',
+        source: 'ShareSansar',
+        url: 'https://www.sharesansar.com/category/announcement',
+      },
+      {
+        id: 'sharesansar-news',
+        label: 'Crawl ShareSansar news',
+        source: 'ShareSansar',
+        url: 'https://www.sharesansar.com/category/latest',
+      },
+      {
+        id: 'merolagani-news',
+        label: 'Crawl MeroLagani market news',
+        source: 'MeroLagani',
+        url: 'https://merolagani.com/NewsList.aspx',
+      },
+      {
+        id: 'nepse-notices',
+        label: 'Crawl NEPSE notices',
+        source: 'NEPSE',
+        url: 'https://www.nepalstock.com.np/news',
+      },
+      {
+        id: 'nepalipaisa-news',
+        label: 'Crawl Nepali Paisa news',
+        source: 'Nepali Paisa',
+        url: `https://www.nepalipaisa.com/News?search=${query}`,
+      },
+      {
+        id: 'chukul-news',
+        label: 'Crawl Chukul market feed',
+        source: 'Chukul',
+        url: `https://chukul.com/news?search=${query}`,
+      },
+    ];
+  }
+
+  private async fetchTextWithRetry(
+    url: string,
+    timeoutMs: number,
+    retries: number,
+  ): Promise<{ text: string; attempts: number; bytesRead: number }> {
+    let lastErr: Error = new Error('No fetch attempt made');
+    for (let attempt = 1; attempt <= retries + 1; attempt++) {
+      try {
+        const res = await fetch(url, {
+          headers: {
+            'User-Agent': this.crawlerUserAgent,
+            Accept: 'text/html,application/xhtml+xml,text/plain',
+          },
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!res.ok) throw new Error(`${new URL(url).hostname} responded with HTTP ${res.status}`);
+        const text = await res.text();
+        return { text, attempts: attempt, bytesRead: text.length };
+      } catch (err) {
+        lastErr = err as Error;
+        if (attempt <= retries) {
+          this.logs.warn(`Prediction crawl retry ${attempt}/${retries} for ${url}: ${lastErr.message}`);
+          await new Promise((resolve) => setTimeout(resolve, 450 * attempt));
+        }
+      }
+    }
+    throw lastErr;
+  }
+
+  private extractRelatedNotices(html: string, source: string, baseUrl: string, symbols: string[]): CrawlNotice[] {
+    const notices: CrawlNotice[] = [];
+    const seen = new Set<string>();
+    const anchorRx = /<a\b[^>]*href=["']?([^"'\s>]+)["']?[^>]*>([\s\S]*?)<\/a>/gi;
+    let match: RegExpExecArray | null;
+
+    while ((match = anchorRx.exec(html)) !== null && notices.length < 32) {
+      const title = this.htmlText(match[2]).replace(/\s+/g, ' ').trim();
+      if (title.length < 12 || title.length > 220) continue;
+
+      const upper = title.toUpperCase();
+      const matchedSymbols = symbols.filter((symbol) => new RegExp(`(^|[^A-Z0-9])${symbol}([^A-Z0-9]|$)`).test(upper));
+      const marketRelated =
+        matchedSymbols.length > 0 ||
+        /\b(dividend|bonus|right share|auction|book closure|agm|earning|profit|loss|merger|listed|notice|ipo|fpo|financial|quarter)\b/i.test(
+          title,
+        );
+      if (!marketRelated) continue;
+
+      const key = `${source}:${title.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const href = match[1] ?? '';
+      let url: string | undefined;
+      try {
+        url = new URL(href, baseUrl).toString();
+      } catch {
+        url = undefined;
+      }
+
+      notices.push({
+        source,
+        title,
+        url,
+        snippet: title,
+        matchedSymbols,
+        sentiment: this.classifyNoticeSentiment(title),
+      });
+    }
+
+    return notices;
+  }
+
+  private classifyNoticeSentiment(text: string): CrawlNotice['sentiment'] {
+    const value = text.toLowerCase();
+    if (/\b(loss|decrease|decline|falls?|suspend|penalty|fine|negative|risk|warning|book closure)\b/.test(value)) {
+      return 'negative';
+    }
+    if (/\b(profit|increase|growth|bonus|dividend|right share|approved|listed|allotment|merger|gain|positive)\b/.test(value)) {
+      return 'positive';
+    }
+    return 'neutral';
+  }
+
+  private predictSymbol(symbol: string, prices: PriceSummary[], notices: CrawlNotice[]): StockPrediction {
+    const price = prices.find((item) => item.symbol === symbol);
+    const relatedNotices = notices
+      .filter((notice) => notice.matchedSymbols.includes(symbol) || notice.matchedSymbols.length === 0)
+      .slice(0, 6);
+    const sentimentScore = relatedNotices.reduce((sum, notice) => {
+      if (notice.sentiment === 'positive') return sum + 10;
+      if (notice.sentiment === 'negative') return sum - 12;
+      return sum;
+    }, 0);
+    const momentumScore = price ? Math.max(-35, Math.min(35, price.changePct * 4)) : 0;
+    const liquidityScore = price?.volume ? Math.min(15, Math.log10(Math.max(price.volume, 1)) * 3) : 0;
+    const score = Math.round(Math.max(-100, Math.min(100, momentumScore + sentimentScore + liquidityScore)));
+    const sourceCount = new Set(relatedNotices.map((notice) => notice.source)).size;
+    const confidence = Math.round(Math.max(35, Math.min(92, 45 + sourceCount * 10 + relatedNotices.length * 3 + (price ? 12 : 0))));
+    const verdict: StockPrediction['verdict'] =
+      score >= 35 ? 'BULLISH' : score >= 12 ? 'WATCH' : score <= -18 ? 'RISK' : 'NEUTRAL';
+    const reasons = [
+      price ? `${price.changePct >= 0 ? 'Positive' : 'Negative'} intraday move of ${price.changePct.toFixed(2)}%.` : 'No live price row found in the crawler cache.',
+      relatedNotices.length
+        ? `${relatedNotices.length} related market notice${relatedNotices.length === 1 ? '' : 's'} influenced the score.`
+        : 'No symbol-specific notice was found across crawled sources.',
+      price?.volume ? `Volume read: ${Math.round(price.volume).toLocaleString('en-US')}.` : 'Volume signal unavailable.',
+    ];
+
+    return {
+      symbol,
+      verdict,
+      confidence,
+      score,
+      price: price?.price,
+      changePct: price?.changePct,
+      volume: price?.volume,
+      turnover: price?.turnover,
+      sector: price?.sector,
+      notices: relatedNotices,
+      reasons,
+    };
   }
 
   private async persistSnapshot() {

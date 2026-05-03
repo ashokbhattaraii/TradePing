@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   InternalServerErrorException,
   UnauthorizedException,
@@ -8,7 +9,10 @@ import { ConfigService } from '@nestjs/config';
 import { createHmac, timingSafeEqual } from 'crypto';
 import { OAuth2Client } from 'google-auth-library';
 import { PrismaService } from '../prisma/prisma.service';
+import { PermissionsService } from './permissions.service';
 import type { AuthSession, AuthUser } from './auth.types';
+
+const HARDCODED_ADMINS = ['bhattaraiashok101@gmail.com'];
 
 interface SessionPayload extends AuthUser {
   iss: 'tradeping';
@@ -40,6 +44,7 @@ export class AuthService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly permissions: PermissionsService,
   ) {}
 
   async signInWithGoogle(credential: string): Promise<AuthSession> {
@@ -72,20 +77,46 @@ export class AuthService {
     const email = payload.email.toLowerCase();
     this.assertAllowedEmail(email);
 
+    const adminByEmail = this.adminEmails().includes(email);
+    // Look up first so we can decide whether to flip an INVITED row to ACTIVE
+    // (first real login) versus a returning user.
+    const existing = await this.prisma.user.findUnique({ where: { googleSub: payload.sub } });
+    const existingByEmail = existing ? null : await this.prisma.user.findUnique({ where: { email } });
+
     const row = await this.prisma.user.upsert({
       where: { googleSub: payload.sub },
       update: {
         email,
         name: payload.name || email,
         picture: payload.picture ?? null,
+        lastLoginAt: new Date(),
+        // INVITED accounts are activated on first sign-in.
+        ...(existing?.status === 'INVITED' ? { status: 'ACTIVE' } : {}),
+        // Hardcoded admin promotion stays sticky as SUPER_ADMIN so the system
+        // is always recoverable.
+        ...(adminByEmail ? { role: 'SUPER_ADMIN' } : {}),
       },
       create: {
         googleSub: payload.sub,
         email,
         name: payload.name || email,
         picture: payload.picture ?? null,
+        role: adminByEmail ? 'SUPER_ADMIN' : existingByEmail?.role ?? 'USER',
+        status: existingByEmail?.status === 'INVITED' ? 'ACTIVE' : 'ACTIVE',
+        permissionsGrant: existingByEmail?.permissionsGrant ?? [],
+        permissionsRevoke: existingByEmail?.permissionsRevoke ?? [],
+        lastLoginAt: new Date(),
       },
     });
+
+    if (row.status === 'SUSPENDED') {
+      throw new ForbiddenException('Your account has been suspended');
+    }
+
+    // Invalidate any cached snapshot (status flip from INVITED → ACTIVE etc.)
+    // and resolve effective permissions so the client gets them immediately.
+    this.permissions.invalidateUser(row.id);
+    const resolved = await this.permissions.resolveUserPermissions(row.id);
 
     const user: AuthUser = {
       id: row.id,
@@ -93,8 +124,18 @@ export class AuthService {
       email,
       name: row.name,
       picture: row.picture,
+      role: row.role,
+      status: row.status as AuthUser['status'],
+      permissions: resolved ? Array.from(resolved.permissions) : [],
     };
     return this.issueSession(user);
+  }
+
+  private adminEmails(): string[] {
+    return [
+      ...HARDCODED_ADMINS,
+      ...splitCsv(this.config.get<string>('ADMIN_EMAILS')),
+    ].map((e) => e.toLowerCase());
   }
 
   issueSession(user: AuthUser): AuthSession {
@@ -102,8 +143,11 @@ export class AuthService {
     const ttlDays = Number(this.config.get('AUTH_SESSION_DAYS') ?? 7);
     const expiresInSeconds = Math.max(1, ttlDays) * 24 * 60 * 60;
     const exp = now + expiresInSeconds;
+    // Strip cached permissions/status from the JWT — they are resolved fresh
+    // from the DB on every request so suspensions and role edits take effect.
+    const { permissions: _omitPerms, status: _omitStatus, ...rest } = user;
     const payload: SessionPayload = {
-      ...user,
+      ...rest,
       iss: 'tradeping',
       iat: now,
       exp,
@@ -140,6 +184,7 @@ export class AuthService {
       email: payload.email,
       name: payload.name,
       picture: payload.picture ?? null,
+      role: payload.role,
     };
   }
 

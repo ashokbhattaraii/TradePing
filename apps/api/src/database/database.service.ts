@@ -10,6 +10,13 @@ export interface ColumnMeta {
   isReadonly?: boolean;
   optional?: boolean;
   enumValues?: string[];
+  /** Visible/editable only by admins. */
+  adminOnly?: boolean;
+}
+
+export interface DbCaller {
+  id: string;
+  isAdmin: boolean;
 }
 
 export interface TableMeta {
@@ -37,21 +44,24 @@ export interface TableMeta {
 const TABLES: TableMeta[] = [
   {
     name: 'user',
-    label: 'My Profile',
-    description: 'Your authenticated account record. Edit your display name or profile picture.',
+    label: 'Users',
+    description:
+      'Authenticated accounts. You see your own row by default; administrators can view and manage everyone.',
     prismaModel: 'user',
     idField: 'id',
     ownerScoped: true,
     ownerField: 'id',
     noCreate: true,
     noDelete: true,
-    searchableFields: ['email', 'name'],
+    defaultSort: { field: 'createdAt', dir: 'desc' },
+    searchableFields: ['email', 'name', 'role'],
     columns: [
       { name: 'id', type: 'string', isId: true, isReadonly: true },
       { name: 'email', type: 'string', isReadonly: true },
       { name: 'name', type: 'string' },
       { name: 'picture', type: 'string', optional: true },
-      { name: 'googleSub', type: 'string', isReadonly: true },
+      { name: 'role', type: 'string', enumValues: ['USER', 'ADMIN'], adminOnly: true },
+      { name: 'googleSub', type: 'string', isReadonly: true, adminOnly: true },
       { name: 'createdAt', type: 'datetime', isReadonly: true },
       { name: 'updatedAt', type: 'datetime', isReadonly: true },
     ],
@@ -208,16 +218,19 @@ const TABLES: TableMeta[] = [
 export class DatabaseService {
   constructor(private readonly prisma: PrismaService) {}
 
-  listTables() {
-    return TABLES.map(({ columns: _columns, ...rest }) => rest);
+  listTables(caller: DbCaller) {
+    return TABLES.map((t) => {
+      const { columns: _columns, ...rest } = this.applyCallerOverrides(t, caller);
+      return rest;
+    });
   }
 
-  async stats(userId: string) {
+  async stats(caller: DbCaller) {
     const out: Record<string, number> = {};
     await Promise.all(
       TABLES.map(async (t) => {
         try {
-          out[t.name] = await this.model(t).count({ where: this.ownerWhere(t, userId) });
+          out[t.name] = await this.model(t).count({ where: this.ownerWhere(t, caller) });
         } catch {
           out[t.name] = 0;
         }
@@ -232,8 +245,26 @@ export class DatabaseService {
     return table;
   }
 
-  getTableMeta(name: string): TableMeta {
-    return this.getTable(name);
+  getTableMeta(name: string, caller: DbCaller): TableMeta {
+    const table = this.applyCallerOverrides(this.getTable(name), caller);
+    return {
+      ...table,
+      columns: table.columns.filter((c) => !c.adminOnly || caller.isAdmin),
+    };
+  }
+
+  /**
+   * Returns the table with caller-aware overrides applied. Admins bypass
+   * owner-scoping and the `noDelete` restriction (but `noCreate` stays sticky
+   * since user accounts are minted by Google OAuth, not by this controller).
+   */
+  private applyCallerOverrides(table: TableMeta, caller: DbCaller): TableMeta {
+    if (!caller.isAdmin) return table;
+    return {
+      ...table,
+      ownerScoped: false,
+      noDelete: table.name === 'user' ? false : table.noDelete,
+    };
   }
 
   private model(table: TableMeta): {
@@ -252,7 +283,7 @@ export class DatabaseService {
 
   async list(
     name: string,
-    userId: string,
+    caller: DbCaller,
     opts: { page: number; limit: number; search?: string; sortField?: string; sortDir?: 'asc' | 'desc' },
   ) {
     const table = this.getTable(name);
@@ -266,7 +297,7 @@ export class DatabaseService {
           })),
         }
       : undefined;
-    const ownerWhere = this.ownerWhere(table, userId);
+    const ownerWhere = this.ownerWhere(table, caller);
     const where = ownerWhere && searchWhere ? { AND: [ownerWhere, searchWhere] } : ownerWhere ?? searchWhere;
 
     const sortField = opts.sortField && table.columns.some((c) => c.name === opts.sortField)
@@ -288,11 +319,12 @@ export class DatabaseService {
     return { rows, total, page, limit, table };
   }
 
-  private coerce(table: TableMeta, payload: Record<string, unknown>, isCreate: boolean) {
+  private coerce(table: TableMeta, payload: Record<string, unknown>, isCreate: boolean, caller: DbCaller) {
     const out: Record<string, unknown> = {};
     for (const col of table.columns) {
       if (!(col.name in payload)) continue;
       if (col.isReadonly) continue;
+      if (col.adminOnly && !caller.isAdmin) continue;
       const raw = payload[col.name];
       if (raw === null || raw === undefined || raw === '') {
         if (col.optional) {
@@ -343,44 +375,61 @@ export class DatabaseService {
     return out;
   }
 
-  async create(name: string, payload: Record<string, unknown>, userId: string) {
+  async create(name: string, payload: Record<string, unknown>, caller: DbCaller) {
     const table = this.getTable(name);
     if (table.noCreate) {
       throw new BadRequestException(`Creating rows in ${table.label} is not allowed`);
     }
-    const data = this.coerce(table, payload, true);
-    if (table.ownerScoped && (table.ownerField ?? 'userId') === 'userId') {
-      data.userId = userId;
+    const data = this.coerce(table, payload, true, caller);
+    if (table.ownerScoped && (table.ownerField ?? 'userId') === 'userId' && !caller.isAdmin) {
+      data.userId = caller.id;
     }
     return this.model(table).create({ data });
   }
 
-  async update(name: string, id: string, payload: Record<string, unknown>, userId: string) {
+  async update(name: string, id: string, payload: Record<string, unknown>, caller: DbCaller) {
     const table = this.getTable(name);
-    await this.assertOwnsRow(table, id, userId);
-    const data = this.coerce(table, payload, false);
+    await this.assertOwnsRow(table, id, caller);
+    const data = this.coerce(table, payload, false, caller);
+    // Safety: an admin must not demote themselves out of the admin role
+    // accidentally — block self-edits that would clear their admin role.
+    if (
+      table.name === 'user' &&
+      caller.isAdmin &&
+      id === caller.id &&
+      'role' in data &&
+      data.role !== 'ADMIN'
+    ) {
+      throw new BadRequestException('You cannot remove your own admin role');
+    }
     return this.model(table).update({ where: { [table.idField]: id }, data });
   }
 
-  async remove(name: string, id: string, userId: string) {
+  async remove(name: string, id: string, caller: DbCaller) {
     const table = this.getTable(name);
-    if (table.noDelete) {
+    const effective = this.applyCallerOverrides(table, caller);
+    if (effective.noDelete) {
       throw new BadRequestException(`Deleting rows in ${table.label} is not allowed`);
     }
-    await this.assertOwnsRow(table, id, userId);
+    if (table.name === 'user' && id === caller.id) {
+      throw new BadRequestException('You cannot delete your own user account here');
+    }
+    await this.assertOwnsRow(table, id, caller);
     await this.model(table).delete({ where: { [table.idField]: id } });
     return { id };
   }
 
-  async removeMany(name: string, ids: string[], userId: string) {
+  async removeMany(name: string, ids: string[], caller: DbCaller) {
     const table = this.getTable(name);
-    if (table.noDelete) {
+    const effective = this.applyCallerOverrides(table, caller);
+    if (effective.noDelete) {
       throw new BadRequestException(`Deleting rows in ${table.label} is not allowed`);
     }
     let deleted = 0;
     for (const id of ids) {
+      if (table.name === 'user' && id === caller.id) continue;
       try {
-        await this.assertOwnsRow(table, id, userId);
+        await this.assertOwnsRow(table, id, caller);
         await this.model(table).delete({ where: { [table.idField]: id } });
         deleted += 1;
       } catch {
@@ -390,7 +439,7 @@ export class DatabaseService {
     return { deleted };
   }
 
-  async export(name: string, userId: string, opts: { search?: string; sortField?: string; sortDir?: 'asc' | 'desc' }) {
+  async export(name: string, caller: DbCaller, opts: { search?: string; sortField?: string; sortDir?: 'asc' | 'desc' }) {
     const table = this.getTable(name);
     const searchWhere = opts.search
       ? {
@@ -399,7 +448,7 @@ export class DatabaseService {
           })),
         }
       : undefined;
-    const ownerWhere = this.ownerWhere(table, userId);
+    const ownerWhere = this.ownerWhere(table, caller);
     const where = ownerWhere && searchWhere ? { AND: [ownerWhere, searchWhere] } : ownerWhere ?? searchWhere;
     const sortField = opts.sortField && table.columns.some((c) => c.name === opts.sortField)
       ? opts.sortField
@@ -410,17 +459,23 @@ export class DatabaseService {
     return { table, rows };
   }
 
-  private ownerWhere(table: TableMeta, userId: string) {
-    if (!table.ownerScoped) return undefined;
+  private ownerWhere(table: TableMeta, caller: DbCaller) {
+    if (caller.isAdmin || !table.ownerScoped) return undefined;
     const field = table.ownerField ?? 'userId';
-    return { [field]: userId };
+    return { [field]: caller.id };
   }
 
-  private async assertOwnsRow(table: TableMeta, id: string, userId: string) {
+  private async assertOwnsRow(table: TableMeta, id: string, caller: DbCaller) {
+    if (caller.isAdmin) {
+      // Admin still needs to verify the row exists for clean error messaging.
+      const row = await this.model(table).findFirst({ where: { [table.idField]: id } });
+      if (!row) throw new NotFoundException(`Row not found in ${table.name}: ${id}`);
+      return;
+    }
     if (!table.ownerScoped) return;
     const field = table.ownerField ?? 'userId';
     const row = await this.model(table).findFirst({
-      where: { [table.idField]: id, [field]: userId },
+      where: { [table.idField]: id, [field]: caller.id },
     });
     if (!row) throw new NotFoundException(`Row not found in ${table.name}: ${id}`);
   }
