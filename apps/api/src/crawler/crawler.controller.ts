@@ -79,6 +79,23 @@ export class CrawlerController {
     return { success: true, data, message: 'AI stock command report generated' };
   }
 
+  @Post('pretrade')
+  async preTrade(
+    @Body() body: { symbol?: string; amount?: number | string; holdingDays?: number | string },
+  ) {
+    const symbol = String(body?.symbol ?? '').trim();
+    const amount = Number(body?.amount);
+    const holdingDays = Number(body?.holdingDays ?? 5);
+    if (!symbol) {
+      throw new BadRequestException('A stock symbol is required');
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('Investment amount must be greater than zero');
+    }
+    const data = await this.crawler.simulatePreTradeRisk(symbol, amount, holdingDays);
+    return { success: true, data, message: 'Pre-trade risk simulation completed' };
+  }
+
   @Post('predict')
   async predict(
     @Body() body: { symbols?: string[] | string; sourceIds?: string[]; customSources?: { label?: string; url: string }[] },

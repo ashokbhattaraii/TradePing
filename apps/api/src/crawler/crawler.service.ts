@@ -163,6 +163,59 @@ export interface StockCommandReport {
   sourceReports: CrawlSourceReport[];
 }
 
+export interface PreTradeRiskReport {
+  symbol: string;
+  name?: string;
+  generatedAt: string;
+  input: {
+    amount: number;
+    holdingDays: number;
+  };
+  price: PriceSummary | null;
+  estimatedUnits: number;
+  estimatedCost: number;
+  downsideScenarios: {
+    label: string;
+    movePct: number;
+    estimatedPrice: number;
+    estimatedLoss: number;
+    lossPct: number;
+  }[];
+  liquidityRisk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+    score: number;
+    dailyTurnoverCoveragePct: number;
+    volumeParticipationPct: number;
+    estimatedExitDays: number;
+    maxComfortablePosition: number;
+    reasons: string[];
+  };
+  sectorRisk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH';
+    relativePerformancePct: number;
+    rankByChange: number | null;
+    peers: number;
+    summary: string;
+  };
+  noticeRisk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH';
+    positive: number;
+    neutral: number;
+    negative: number;
+    summary: string;
+    notices: CrawlNotice[];
+  };
+  overall: {
+    decision: 'PASS' | 'WAIT' | 'SMALL_POSITION' | 'AVOID';
+    level: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+    score: number;
+    summary: string;
+  };
+  alertPlan: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
+  assumptions: string[];
+  evidence: string[];
+}
+
 export interface CrawlSourceConfig {
   id: string;
   label: string;
@@ -367,6 +420,58 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
       suggestedPlan,
       prediction,
       sourceReports: predictionReport.sourceReports,
+    };
+  }
+
+  async simulatePreTradeRisk(rawSymbol: string, amount: number, holdingDays: number): Promise<PreTradeRiskReport> {
+    const symbol = this.normalizeSymbols([rawSymbol])[0];
+    if (!symbol) throw new Error('A valid stock symbol is required');
+    const safeAmount = Math.max(0, Math.round(Number(amount) || 0));
+    const safeHoldingDays = Math.max(1, Math.min(365, Math.round(Number(holdingDays) || 1)));
+    if (safeAmount <= 0) throw new Error('Investment amount must be greater than zero');
+
+    const command = await this.getStockCommandReport(symbol);
+    const price = command.price;
+    const currentPrice = price?.price ?? 0;
+    const estimatedUnits = currentPrice > 0 ? Math.floor(safeAmount / currentPrice) : 0;
+    const estimatedCost = estimatedUnits * currentPrice;
+    const downsideScenarios = this.buildDownsideScenarios(price, command, estimatedCost, safeHoldingDays);
+    const liquidityRisk = this.buildLiquidityRisk(price, safeAmount, estimatedUnits);
+    const sectorRisk = this.buildPreTradeSectorRisk(command);
+    const noticeRisk = this.buildNoticeRisk(command.notices, command.confidence.score);
+    const overall = this.buildPreTradeOverall(command, liquidityRisk, sectorRisk, noticeRisk, safeHoldingDays);
+    const alertPlan = this.buildPreTradeAlertPlan(price, downsideScenarios);
+    const evidence = [
+      price ? 'live price and turnover' : 'no live price',
+      command.confidence.coverage.length ? command.confidence.coverage.join(', ') : 'limited crawler coverage',
+      command.brokerActivity.status === 'live' ? 'broker floorsheet rows' : 'turnover proxy',
+    ];
+
+    this.logs.info(`Pre-trade risk simulation generated for ${symbol}`);
+
+    return {
+      symbol,
+      name: command.name,
+      generatedAt: new Date().toISOString(),
+      input: {
+        amount: safeAmount,
+        holdingDays: safeHoldingDays,
+      },
+      price,
+      estimatedUnits,
+      estimatedCost,
+      downsideScenarios,
+      liquidityRisk,
+      sectorRisk,
+      noticeRisk,
+      overall,
+      alertPlan,
+      assumptions: [
+        'Simulator uses public crawler data and does not include broker commission, DP charge, tax, or slippage.',
+        'Exit difficulty assumes selling no more than 10% of the latest traded daily volume.',
+        'Downside bands are risk estimates from current volatility, sector context, notices, and holding period.',
+      ],
+      evidence,
     };
   }
 
@@ -1011,6 +1116,181 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
         { condition: 'BELOW', targetPrice: lower, reason: 'Risk control if momentum fails.' },
       ],
     };
+  }
+
+  private buildDownsideScenarios(
+    price: PriceSummary | null,
+    command: StockCommandReport,
+    estimatedCost: number,
+    holdingDays: number,
+  ): PreTradeRiskReport['downsideScenarios'] {
+    if (!price || estimatedCost <= 0) return [];
+    const holdingMultiplier = Math.sqrt(Math.min(holdingDays, 60) / 5);
+    const riskMultiplier = command.risk.level === 'EXTREME' ? 1.8 : command.risk.level === 'HIGH' ? 1.45 : command.risk.level === 'MODERATE' ? 1.15 : 0.9;
+    const baseMove = Math.max(2, Math.abs(price.changePct), command.movement.dayRangePct, command.movement.volatilityPct);
+    const moves = [
+      { label: 'Normal Pullback', movePct: -Math.min(12, Math.max(2, baseMove * 0.75)) },
+      { label: 'Volatile Session', movePct: -Math.min(22, Math.max(5, baseMove * riskMultiplier * holdingMultiplier)) },
+      { label: 'Stress Exit', movePct: -Math.min(35, Math.max(10, baseMove * 1.8 * riskMultiplier * holdingMultiplier)) },
+    ];
+    return moves.map((item) => ({
+      label: item.label,
+      movePct: Math.round(item.movePct * 100) / 100,
+      estimatedPrice: Math.max(0, Math.round(price.price * (1 + item.movePct / 100) * 100) / 100),
+      estimatedLoss: Math.round(Math.abs(estimatedCost * (item.movePct / 100))),
+      lossPct: Math.round(Math.abs(item.movePct) * 100) / 100,
+    }));
+  }
+
+  private buildLiquidityRisk(
+    price: PriceSummary | null,
+    amount: number,
+    estimatedUnits: number,
+  ): PreTradeRiskReport['liquidityRisk'] {
+    if (!price || price.volume <= 0 || price.turnover <= 0) {
+      return {
+        level: 'HIGH',
+        score: 72,
+        dailyTurnoverCoveragePct: 0,
+        volumeParticipationPct: 0,
+        estimatedExitDays: 99,
+        maxComfortablePosition: 0,
+        reasons: ['Live volume or turnover is unavailable, so exit capacity cannot be trusted.'],
+      };
+    }
+    const dailyTurnoverCoveragePct = (amount / price.turnover) * 100;
+    const volumeParticipationPct = estimatedUnits > 0 ? (estimatedUnits / price.volume) * 100 : 0;
+    const estimatedExitDays = estimatedUnits > 0 ? Math.ceil(estimatedUnits / Math.max(1, price.volume * 0.1)) : 0;
+    const maxComfortablePosition = Math.round(price.turnover * 0.02);
+    let score = 15;
+    const reasons: string[] = [];
+    if (dailyTurnoverCoveragePct > 25) {
+      score += 48;
+      reasons.push('Position is more than 25% of latest turnover.');
+    } else if (dailyTurnoverCoveragePct > 10) {
+      score += 28;
+      reasons.push('Position is above 10% of latest turnover.');
+    } else {
+      reasons.push('Position size is manageable versus latest turnover.');
+    }
+    if (volumeParticipationPct > 20) {
+      score += 24;
+      reasons.push('Estimated units are a large share of latest traded volume.');
+    } else if (volumeParticipationPct > 8) {
+      score += 12;
+      reasons.push('Estimated units may need careful exit execution.');
+    }
+    if (estimatedExitDays > 3) {
+      score += 16;
+      reasons.push(`Exit may take around ${estimatedExitDays} sessions at 10% volume participation.`);
+    }
+    score = Math.min(100, Math.round(score));
+    const level: PreTradeRiskReport['liquidityRisk']['level'] =
+      score >= 82 ? 'EXTREME' : score >= 62 ? 'HIGH' : score >= 38 ? 'MODERATE' : 'LOW';
+    return {
+      level,
+      score,
+      dailyTurnoverCoveragePct: Math.round(dailyTurnoverCoveragePct * 100) / 100,
+      volumeParticipationPct: Math.round(volumeParticipationPct * 100) / 100,
+      estimatedExitDays,
+      maxComfortablePosition,
+      reasons,
+    };
+  }
+
+  private buildPreTradeSectorRisk(command: StockCommandReport): PreTradeRiskReport['sectorRisk'] {
+    const price = command.price;
+    const relative = price ? price.changePct - command.sectorComparison.sectorAverageChangePct : 0;
+    const weakRank =
+      command.sectorComparison.rankByChange !== null &&
+      command.sectorComparison.peers > 0 &&
+      command.sectorComparison.rankByChange > Math.ceil(command.sectorComparison.peers * 0.66);
+    const level: PreTradeRiskReport['sectorRisk']['level'] = relative < -3 || weakRank ? 'HIGH' : relative < -1 ? 'MODERATE' : 'LOW';
+    const summary =
+      level === 'HIGH'
+        ? `Weak versus ${command.sectorComparison.sector}; avoid chasing until relative strength improves.`
+        : level === 'MODERATE'
+          ? `Slightly weak versus ${command.sectorComparison.sector}; wait for confirmation.`
+          : `Sector context is acceptable versus ${command.sectorComparison.peers} peers.`;
+    return {
+      level,
+      relativePerformancePct: Math.round(relative * 100) / 100,
+      rankByChange: command.sectorComparison.rankByChange,
+      peers: command.sectorComparison.peers,
+      summary,
+    };
+  }
+
+  private buildNoticeRisk(notices: CrawlNotice[], confidenceScore: number): PreTradeRiskReport['noticeRisk'] {
+    const positive = notices.filter((notice) => notice.sentiment === 'positive').length;
+    const negative = notices.filter((notice) => notice.sentiment === 'negative').length;
+    const neutral = notices.length - positive - negative;
+    const level: PreTradeRiskReport['noticeRisk']['level'] =
+      negative > 0 ? 'HIGH' : notices.length === 0 || confidenceScore < 50 ? 'MODERATE' : 'LOW';
+    const summary =
+      negative > 0
+        ? `${negative} negative notice/news signal${negative === 1 ? '' : 's'} found; review source before entry.`
+        : notices.length > 0
+          ? `${notices.length} related notice/news item${notices.length === 1 ? '' : 's'} found with no negative match.`
+          : 'No symbol-specific notice was found; treat this as information risk, not clean confirmation.';
+    return {
+      level,
+      positive,
+      neutral,
+      negative,
+      summary,
+      notices: notices.slice(0, 5),
+    };
+  }
+
+  private buildPreTradeOverall(
+    command: StockCommandReport,
+    liquidity: PreTradeRiskReport['liquidityRisk'],
+    sector: PreTradeRiskReport['sectorRisk'],
+    notice: PreTradeRiskReport['noticeRisk'],
+    holdingDays: number,
+  ): PreTradeRiskReport['overall'] {
+    const sectorScore = sector.level === 'HIGH' ? 70 : sector.level === 'MODERATE' ? 45 : 20;
+    const noticeScore = notice.level === 'HIGH' ? 76 : notice.level === 'MODERATE' ? 48 : 18;
+    const holdingPenalty = holdingDays <= 3 ? 10 : holdingDays <= 14 ? 4 : 0;
+    const score = Math.min(
+      100,
+      Math.round(command.risk.score * 0.28 + liquidity.score * 0.34 + sectorScore * 0.18 + noticeScore * 0.15 + holdingPenalty),
+    );
+    const level: PreTradeRiskReport['overall']['level'] =
+      score >= 82 ? 'EXTREME' : score >= 62 ? 'HIGH' : score >= 38 ? 'MODERATE' : 'LOW';
+    const decision: PreTradeRiskReport['overall']['decision'] =
+      level === 'EXTREME' || (level === 'HIGH' && notice.level === 'HIGH')
+        ? 'AVOID'
+        : level === 'HIGH'
+          ? 'WAIT'
+          : level === 'MODERATE'
+            ? 'SMALL_POSITION'
+            : 'PASS';
+    const summary =
+      decision === 'AVOID'
+        ? 'Risk is too high for a new entry; wait for cleaner evidence.'
+        : decision === 'WAIT'
+          ? 'Wait for better liquidity, lower volatility, or stronger sector confirmation.'
+          : decision === 'SMALL_POSITION'
+            ? 'Only consider a smaller starter position with strict alerts.'
+            : 'Risk looks acceptable under current public market evidence.';
+    return { decision, level, score, summary };
+  }
+
+  private buildPreTradeAlertPlan(
+    price: PriceSummary | null,
+    downsideScenarios: PreTradeRiskReport['downsideScenarios'],
+  ): PreTradeRiskReport['alertPlan'] {
+    if (!price) return [];
+    const normalLossPct = downsideScenarios[0]?.lossPct ?? 2;
+    const stopPct = Math.max(2, Math.min(8, normalLossPct));
+    const breakout = Math.round(price.price * 1.025 * 10) / 10;
+    const fail = Math.round(price.price * (1 - stopPct / 100) * 10) / 10;
+    return [
+      { condition: 'ABOVE', targetPrice: breakout, reason: 'Only enter stronger if price confirms above the current range.' },
+      { condition: 'BELOW', targetPrice: fail, reason: `Exit warning around estimated normal pullback risk (${stopPct.toFixed(1)}%).` },
+    ];
   }
 
   private num(value: string | undefined): number {

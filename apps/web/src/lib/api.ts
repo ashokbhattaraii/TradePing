@@ -275,6 +275,59 @@ export interface StockCommandReport {
   sourceReports: CrawlSourceReport[];
 }
 
+export interface PreTradeRiskReport {
+  symbol: string;
+  name?: string;
+  generatedAt: string;
+  input: {
+    amount: number;
+    holdingDays: number;
+  };
+  price: PriceSummary | null;
+  estimatedUnits: number;
+  estimatedCost: number;
+  downsideScenarios: {
+    label: string;
+    movePct: number;
+    estimatedPrice: number;
+    estimatedLoss: number;
+    lossPct: number;
+  }[];
+  liquidityRisk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+    score: number;
+    dailyTurnoverCoveragePct: number;
+    volumeParticipationPct: number;
+    estimatedExitDays: number;
+    maxComfortablePosition: number;
+    reasons: string[];
+  };
+  sectorRisk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH';
+    relativePerformancePct: number;
+    rankByChange: number | null;
+    peers: number;
+    summary: string;
+  };
+  noticeRisk: {
+    level: 'LOW' | 'MODERATE' | 'HIGH';
+    positive: number;
+    neutral: number;
+    negative: number;
+    summary: string;
+    notices: CrawlNotice[];
+  };
+  overall: {
+    decision: 'PASS' | 'WAIT' | 'SMALL_POSITION' | 'AVOID';
+    level: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+    score: number;
+    summary: string;
+  };
+  alertPlan: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
+  assumptions: string[];
+  evidence: string[];
+}
+
 export type UserRole = string;
 export type UserStatus = 'ACTIVE' | 'SUSPENDED' | 'INVITED';
 
@@ -436,6 +489,12 @@ export const api = {
     request<ApiResponse<PricePoint[]>>(`/crawler/prices/${encodeURIComponent(symbol)}/history?range=${range}`),
   stockCommand: (symbol: string) =>
     request<ApiResponse<StockCommandReport>>(`/crawler/command/${encodeURIComponent(symbol)}`, { timeoutMs: 150_000 }),
+  preTradeRisk: (body: { symbol: string; amount: number; holdingDays: number }) =>
+    request<ApiResponse<PreTradeRiskReport>>('/crawler/pretrade', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeoutMs: 150_000,
+    }),
   predictStocks: (symbols: string[], sourceIds?: string[], customSources?: { label?: string; url: string }[]) =>
     request<ApiResponse<CrawlPredictionReport>>('/crawler/predict', {
       method: 'POST',
