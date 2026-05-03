@@ -25,8 +25,21 @@ import { Input, Select } from './ui/input';
 import { useToast } from './ui/toast';
 
 type Tone = 'success' | 'info' | 'warn' | 'danger' | 'default';
-type TradeScenario = { id: string; label: string; amount: string; holdingDays: string };
-type ScenarioReport = { scenario: TradeScenario; report: PreTradeRiskReport };
+type RiskLevel = 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+type Decision = PreTradeRiskReport['overall']['decision'];
+type AnalysisIteration = {
+  id: 'base' | 'liquidity' | 'stress';
+  label: string;
+  focus: string;
+  decision: Decision;
+  level: RiskLevel;
+  score: number;
+  estimatedLoss: number;
+  lossPct: number;
+  exitDays: number;
+  summary: string;
+  checks: string[];
+};
 
 const levelTone: Record<'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME', Tone> = {
   LOW: 'success',
@@ -54,14 +67,95 @@ function stockLabel(stock: PriceSummary) {
   return stock.name && stock.name !== stock.symbol ? `${stock.symbol} - ${stock.name}` : stock.symbol;
 }
 
-function scenarioScore(report: PreTradeRiskReport) {
-  const stressLoss = report.downsideScenarios.find((scenario) => scenario.label === 'Stress Exit')?.lossPct ?? 0;
-  return (
-    report.overall.score +
-    report.liquidityRisk.score * 0.45 +
-    report.liquidityRisk.estimatedExitDays * 2 +
-    stressLoss * 1.5
+function levelFromScore(score: number): RiskLevel {
+  if (score >= 82) return 'EXTREME';
+  if (score >= 62) return 'HIGH';
+  if (score >= 38) return 'MODERATE';
+  return 'LOW';
+}
+
+function decisionFromScore(score: number, hasNegativeNotice = false): Decision {
+  if (score >= 82 || (score >= 62 && hasNegativeNotice)) return 'AVOID';
+  if (score >= 62) return 'WAIT';
+  if (score >= 38) return 'SMALL_POSITION';
+  return 'PASS';
+}
+
+function scenarioByLabel(report: PreTradeRiskReport, label: string) {
+  return report.downsideScenarios.find((scenario) => scenario.label === label) ?? report.downsideScenarios[0];
+}
+
+function buildAnalysisIterations(report: PreTradeRiskReport): AnalysisIteration[] {
+  const normal = scenarioByLabel(report, 'Normal Pullback');
+  const volatile = scenarioByLabel(report, 'Volatile Session');
+  const stress = scenarioByLabel(report, 'Stress Exit');
+  const negativeNotice = report.noticeRisk.negative > 0;
+  const liquidityScore = Math.min(
+    100,
+    Math.round(report.overall.score * 0.5 + report.liquidityRisk.score * 0.42 + report.liquidityRisk.estimatedExitDays * 2),
   );
+  const stressScore = Math.min(
+    100,
+    Math.round(
+      Math.max(report.overall.score, report.liquidityRisk.score) +
+        (stress?.lossPct ?? 0) * 1.2 +
+        (negativeNotice ? 8 : 0),
+    ),
+  );
+
+  return [
+    {
+      id: 'base',
+      label: 'Iteration 1',
+      focus: 'Base evidence',
+      decision: report.overall.decision,
+      level: report.overall.level,
+      score: report.overall.score,
+      estimatedLoss: normal?.estimatedLoss ?? 0,
+      lossPct: normal?.lossPct ?? 0,
+      exitDays: report.liquidityRisk.estimatedExitDays,
+      summary: 'Uses the normal pullback band with the current price, sector, notice, and liquidity evidence.',
+      checks: [
+        `Current decision: ${report.overall.decision.replace('_', ' ')}`,
+        `Normal downside: ${normal?.lossPct.toFixed(2) ?? '0.00'}%`,
+        `Evidence: ${report.evidence.join(', ')}`,
+      ],
+    },
+    {
+      id: 'liquidity',
+      label: 'Iteration 2',
+      focus: 'Liquidity adjusted',
+      decision: decisionFromScore(liquidityScore, negativeNotice),
+      level: levelFromScore(liquidityScore),
+      score: liquidityScore,
+      estimatedLoss: volatile?.estimatedLoss ?? normal?.estimatedLoss ?? 0,
+      lossPct: volatile?.lossPct ?? normal?.lossPct ?? 0,
+      exitDays: report.liquidityRisk.estimatedExitDays,
+      summary: 'Re-weights the same trade toward turnover usage, volume participation, and estimated exit days.',
+      checks: [
+        `Turnover used: ${report.liquidityRisk.dailyTurnoverCoveragePct.toFixed(2)}%`,
+        `Volume used: ${report.liquidityRisk.volumeParticipationPct.toFixed(2)}%`,
+        `Estimated exit: ${report.liquidityRisk.estimatedExitDays} session${report.liquidityRisk.estimatedExitDays === 1 ? '' : 's'}`,
+      ],
+    },
+    {
+      id: 'stress',
+      label: 'Iteration 3',
+      focus: 'Stress confirmation',
+      decision: decisionFromScore(stressScore, negativeNotice),
+      level: levelFromScore(stressScore),
+      score: stressScore,
+      estimatedLoss: stress?.estimatedLoss ?? volatile?.estimatedLoss ?? 0,
+      lossPct: stress?.lossPct ?? volatile?.lossPct ?? 0,
+      exitDays: report.liquidityRisk.estimatedExitDays > 30 ? 30 : Math.max(report.liquidityRisk.estimatedExitDays, 1),
+      summary: 'Uses the stress-exit band and penalizes weak notices or difficult liquidity to test the worst acceptable case.',
+      checks: [
+        `Stress downside: ${stress?.lossPct.toFixed(2) ?? '0.00'}%`,
+        `Notice risk: ${report.noticeRisk.level}`,
+        `Sector risk: ${report.sectorRisk.level}`,
+      ],
+    },
+  ];
 }
 
 export function PreTradeRiskSimulator({
@@ -74,16 +168,14 @@ export function PreTradeRiskSimulator({
   const { push } = useToast();
   const stockOptions = useMemo(() => [...stocks].sort((a, b) => a.symbol.localeCompare(b.symbol)), [stocks]);
   const [symbol, setSymbol] = useState('');
-  const [scenarios, setScenarios] = useState<TradeScenario[]>([
-    { id: 'starter', label: 'Starter', amount: '50000', holdingDays: '3' },
-    { id: 'planned', label: 'Planned', amount: '100000', holdingDays: '7' },
-    { id: 'stretch', label: 'Stretch', amount: '150000', holdingDays: '14' },
-  ]);
-  const [scenarioReports, setScenarioReports] = useState<ScenarioReport[]>([]);
-  const [activeScenarioId, setActiveScenarioId] = useState('planned');
+  const [amount, setAmount] = useState('100000');
+  const [holdingDays, setHoldingDays] = useState('7');
+  const [activeIterationId, setActiveIterationId] = useState<AnalysisIteration['id']>('base');
   const [report, setReport] = useState<PreTradeRiskReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [creatingAlert, setCreatingAlert] = useState<string | null>(null);
+  const iterations = useMemo(() => (report ? buildAnalysisIterations(report) : []), [report]);
+  const activeIteration = iterations.find((iteration) => iteration.id === activeIterationId) ?? iterations[0];
 
   useEffect(() => {
     if (!symbol && stockOptions[0]) setSymbol(stockOptions[0].symbol);
@@ -94,44 +186,27 @@ export function PreTradeRiskSimulator({
       push('error', 'Select a stock before simulating risk.');
       return;
     }
-    const validScenarios = scenarios.map((scenario) => ({
-      ...scenario,
-      numericAmount: Number(scenario.amount),
-      numericHoldingDays: Number(scenario.holdingDays),
-    }));
-    if (validScenarios.some((scenario) => !Number.isFinite(scenario.numericAmount) || scenario.numericAmount <= 0)) {
-      push('error', 'Each scenario needs an investment amount greater than zero.');
+    const numericAmount = Number(amount);
+    const numericHoldingDays = Number(holdingDays);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      push('error', 'Enter an investment amount greater than zero.');
       return;
     }
     setLoading(true);
     try {
-      const results = await Promise.all(
-        validScenarios.map(async (scenario) => {
-          const res = await api.preTradeRisk({
-            symbol,
-            amount: scenario.numericAmount,
-            holdingDays: Number.isFinite(scenario.numericHoldingDays) ? scenario.numericHoldingDays : 7,
-          });
-          return { scenario, report: res.data };
-        }),
-      );
-      const ranked = [...results].sort((a, b) => scenarioScore(a.report) - scenarioScore(b.report));
-      const preferred = ranked[0] ?? results[0];
-      setScenarioReports(results);
-      setActiveScenarioId(preferred?.scenario.id ?? 'planned');
-      setReport(preferred?.report ?? null);
-      push('success', `Compared ${results.length} pre-trade scenarios for ${symbol}`);
+      const res = await api.preTradeRisk({
+        symbol,
+        amount: numericAmount,
+        holdingDays: Number.isFinite(numericHoldingDays) ? numericHoldingDays : 7,
+      });
+      setReport(res.data);
+      setActiveIterationId('base');
+      push('success', `Generated 3 analysis iterations for ${res.data.symbol}`);
     } catch (err) {
       push('error', (err as Error).message || 'Failed to simulate pre-trade risk.');
     } finally {
       setLoading(false);
     }
-  };
-
-  const updateScenario = (id: string, patch: Partial<TradeScenario>) => {
-    setScenarios((prev) => prev.map((scenario) => (scenario.id === id ? { ...scenario, ...patch } : scenario)));
-    setScenarioReports([]);
-    setReport(null);
   };
 
   const createAlert = async (idea: PreTradeRiskReport['alertPlan'][number]) => {
@@ -180,7 +255,6 @@ export function PreTradeRiskSimulator({
                   value={symbol}
                   onChange={(event) => {
                     setSymbol(event.target.value);
-                    setScenarioReports([]);
                     setReport(null);
                   }}
                 >
@@ -197,47 +271,46 @@ export function PreTradeRiskSimulator({
               </label>
               <Button type="button" variant="secondary" onClick={simulate} loading={loading} disabled={!symbol}>
                 <GitCompareArrows className="h-4 w-4" aria-hidden="true" />
-                Compare 3
+                Run 3 Iterations
               </Button>
             </div>
           </div>
         </div>
 
-        <div className="grid gap-3 border-b border-white/10 bg-black/10 p-5 lg:grid-cols-3">
-          {scenarios.map((scenario, index) => (
-            <div key={scenario.id} className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-white">{scenario.label}</div>
-                  <div className="text-xs text-white/35">Iteration {index + 1}</div>
-                </div>
-                <Badge tone={scenario.id === activeScenarioId ? 'success' : 'default'}>{scenario.id}</Badge>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Amount</span>
-                  <Input
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    value={scenario.amount}
-                    onChange={(event) => updateScenario(scenario.id, { amount: event.target.value })}
-                  />
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Days</span>
-                  <Input
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    max={365}
-                    value={scenario.holdingDays}
-                    onChange={(event) => updateScenario(scenario.id, { holdingDays: event.target.value })}
-                  />
-                </label>
-              </div>
-            </div>
-          ))}
+        <div className="grid gap-3 border-b border-white/10 bg-black/10 p-5 lg:grid-cols-[minmax(0,1fr)_180px_160px]">
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+            <div className="text-sm font-semibold text-white">Same Trade Setup</div>
+            <p className="mt-1 text-xs leading-5 text-white/40">
+              One stock, one amount, one holding period. The app runs three analysis passes against the same setup.
+            </p>
+          </div>
+          <label className="block rounded-lg border border-white/10 bg-white/[0.03] p-3">
+            <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Amount</span>
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              value={amount}
+              onChange={(event) => {
+                setAmount(event.target.value);
+                setReport(null);
+              }}
+            />
+          </label>
+          <label className="block rounded-lg border border-white/10 bg-white/[0.03] p-3">
+            <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Holding Days</span>
+            <Input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={365}
+              value={holdingDays}
+              onChange={(event) => {
+                setHoldingDays(event.target.value);
+                setReport(null);
+              }}
+            />
+          </label>
         </div>
 
         {!report ? (
@@ -246,26 +319,23 @@ export function PreTradeRiskSimulator({
               {loading ? <Loader2 className="h-5 w-5 animate-spin text-white/45" aria-hidden="true" /> : <ShieldAlert className="h-5 w-5 text-white/35" aria-hidden="true" />}
             </div>
             <p className="mt-4 max-w-xl text-sm text-white/45">
-              Run the three iterations to compare starter, planned, and stretch positions before buying.
+              Run three iterations on the same amount and holding period to compare base, liquidity-adjusted, and stress conclusions.
             </p>
           </div>
         ) : (
           <div className="grid gap-5 p-5">
-            {scenarioReports.length > 0 && (
-              <ScenarioComparison
-                reports={scenarioReports}
-                activeScenarioId={activeScenarioId}
-                onSelect={(item) => {
-                  setActiveScenarioId(item.scenario.id);
-                  setReport(item.report);
-                }}
+            {iterations.length > 0 && (
+              <IterationComparison
+                iterations={iterations}
+                activeIterationId={activeIteration?.id ?? 'base'}
+                onSelect={(iteration) => setActiveIterationId(iteration.id)}
               />
             )}
             <RiskReport
               report={report}
               onCreateAlert={createAlert}
               creatingAlert={creatingAlert}
-              scenarioLabel={scenarioReports.find((item) => item.scenario.id === activeScenarioId)?.scenario.label}
+              iteration={activeIteration}
             />
           </div>
         )}
@@ -274,45 +344,41 @@ export function PreTradeRiskSimulator({
   );
 }
 
-function ScenarioComparison({
-  reports,
-  activeScenarioId,
+function IterationComparison({
+  iterations,
+  activeIterationId,
   onSelect,
 }: {
-  reports: ScenarioReport[];
-  activeScenarioId: string;
-  onSelect: (item: ScenarioReport) => void;
+  iterations: AnalysisIteration[];
+  activeIterationId: AnalysisIteration['id'];
+  onSelect: (iteration: AnalysisIteration) => void;
 }) {
-  const ranked = [...reports].sort((a, b) => scenarioScore(a.report) - scenarioScore(b.report));
+  const ranked = [...iterations].sort((a, b) => a.score - b.score);
   const best = ranked[0];
-  const worstStressLoss = Math.max(
-    ...reports.map((item) => item.report.downsideScenarios.find((scenario) => scenario.label === 'Stress Exit')?.estimatedLoss ?? 0),
-  );
+  const worstLoss = Math.max(...iterations.map((iteration) => iteration.estimatedLoss));
 
   return (
     <Card className="p-5">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
         <div>
-          <SectionTitle icon={GitCompareArrows} title="3-Iteration Comparison" />
+          <SectionTitle icon={GitCompareArrows} title="Same-Scenario 3-Iteration Analysis" />
           <p className="mt-2 text-sm text-white/45">
-            {best ? `${best.scenario.label} is currently the cleanest version by blended risk, exit pressure, and stress loss.` : 'Run the scenarios to rank trade plans.'}
+            {best ? `${best.label} is the cleanest pass for this exact amount, price, and holding period.` : 'Run the setup to compare all three analysis passes.'}
           </p>
         </div>
         <div className="rounded-lg border border-red-400/15 bg-red-400/[0.04] px-3 py-2 text-right">
-          <div className="text-xs uppercase tracking-wider text-red-200/50">Worst Stress Loss</div>
-          <div className="font-mono text-lg font-semibold text-red-200">Rs. {money(worstStressLoss)}</div>
+          <div className="text-xs uppercase tracking-wider text-red-200/50">Highest Iteration Loss</div>
+          <div className="font-mono text-lg font-semibold text-red-200">Rs. {money(worstLoss)}</div>
         </div>
       </div>
       <div className="mt-4 grid gap-3 xl:grid-cols-3">
-        {reports.map((item) => {
-          const active = item.scenario.id === activeScenarioId;
-          const stress = item.report.downsideScenarios.find((scenario) => scenario.label === 'Stress Exit');
-          const score = Math.round(scenarioScore(item.report));
+        {iterations.map((iteration) => {
+          const active = iteration.id === activeIterationId;
           return (
             <button
-              key={item.scenario.id}
+              key={iteration.id}
               type="button"
-              onClick={() => onSelect(item)}
+              onClick={() => onSelect(iteration)}
               className={cn(
                 'rounded-lg border p-4 text-left transition-[background-color,border-color,transform] hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35',
                 active ? 'border-amber-400/45 bg-amber-400/10' : 'border-white/10 bg-white/[0.03] hover:border-white/20',
@@ -320,19 +386,18 @@ function ScenarioComparison({
             >
               <div className="mb-3 flex items-center justify-between gap-3">
                 <span>
-                  <span className="block text-sm font-semibold text-white">{item.scenario.label}</span>
-                  <span className="block text-xs text-white/35">
-                    Rs. {money(item.report.input.amount)} for {item.report.input.holdingDays}d
-                  </span>
+                  <span className="block text-sm font-semibold text-white">{iteration.label}</span>
+                  <span className="block text-xs text-white/35">{iteration.focus}</span>
                 </span>
-                <Badge tone={decisionTone[item.report.overall.decision]}>{item.report.overall.decision.replace('_', ' ')}</Badge>
+                <Badge tone={decisionTone[iteration.decision]}>{iteration.decision.replace('_', ' ')}</Badge>
               </div>
               <div className="grid grid-cols-2 gap-2 text-xs">
-                <InfoRow label="Risk" value={`${item.report.overall.score}/100`} />
-                <InfoRow label="Blend" value={score.toString()} />
-                <InfoRow label="Exit" value={item.report.liquidityRisk.estimatedExitDays > 30 ? '30+' : `${item.report.liquidityRisk.estimatedExitDays}d`} />
-                <InfoRow label="Stress" value={stress ? `Rs. ${compact(stress.estimatedLoss)}` : '—'} />
+                <InfoRow label="Score" value={`${iteration.score}/100`} />
+                <InfoRow label="Level" value={iteration.level} />
+                <InfoRow label="Exit" value={iteration.exitDays > 30 ? '30+' : `${iteration.exitDays}d`} />
+                <InfoRow label="Loss" value={`Rs. ${compact(iteration.estimatedLoss)}`} />
               </div>
+              <p className="mt-3 line-clamp-2 text-xs leading-5 text-white/45">{iteration.summary}</p>
             </button>
           );
         })}
@@ -345,13 +410,16 @@ function RiskReport({
   report,
   onCreateAlert,
   creatingAlert,
-  scenarioLabel,
+  iteration,
 }: {
   report: PreTradeRiskReport;
   onCreateAlert: (idea: PreTradeRiskReport['alertPlan'][number]) => void;
   creatingAlert: string | null;
-  scenarioLabel?: string;
+  iteration?: AnalysisIteration;
 }) {
+  const decision = iteration?.decision ?? report.overall.decision;
+  const level = iteration?.level ?? report.overall.level;
+  const score = iteration?.score ?? report.overall.score;
   return (
     <div className="grid gap-5">
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -360,13 +428,20 @@ function RiskReport({
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="font-mono text-3xl font-bold text-white">{report.symbol}</h3>
-                {scenarioLabel && <Badge tone="default">{scenarioLabel}</Badge>}
-                <Badge tone={decisionTone[report.overall.decision]}>{report.overall.decision.replace('_', ' ')}</Badge>
-                <Badge tone={levelTone[report.overall.level]}>{report.overall.level} Risk</Badge>
-                <Badge tone="default">Score {report.overall.score}/100</Badge>
+                {iteration && <Badge tone="default">{iteration.focus}</Badge>}
+                <Badge tone={decisionTone[decision]}>{decision.replace('_', ' ')}</Badge>
+                <Badge tone={levelTone[level]}>{level} Risk</Badge>
+                <Badge tone="default">Score {score}/100</Badge>
               </div>
               {report.name && report.name !== report.symbol && <p className="mt-1 truncate text-sm text-white/50">{report.name}</p>}
-              <p className="mt-4 max-w-3xl text-sm leading-6 text-white/65">{report.overall.summary}</p>
+              <p className="mt-4 max-w-3xl text-sm leading-6 text-white/65">{iteration?.summary ?? report.overall.summary}</p>
+              {iteration && (
+                <div className="mt-4 grid gap-2">
+                  {iteration.checks.map((check) => (
+                    <Reason key={check} text={check} />
+                  ))}
+                </div>
+              )}
             </div>
             <div className="grid min-w-52 gap-2 rounded-lg border border-white/10 bg-white/[0.03] p-3">
               <InfoRow label="Amount" value={`Rs. ${money(report.input.amount)}`} />
