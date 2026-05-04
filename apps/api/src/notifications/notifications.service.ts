@@ -28,20 +28,36 @@ interface PortfolioBotNotificationReport {
   gainPct: number;
   riskScore: number;
   summary: string;
+  dataQuality?: string[];
+  concentrationWarning?: string | null;
+  realizedGain?: number;
+  fees?: number;
+  taxes?: number;
+  dividends?: number;
+  netPnl?: number;
+  dayGain?: number;
+  dayGainPct?: number;
+  sinceLastRunPct?: number | null;
   holdings: Array<{
     symbol: string;
     name?: string;
     quantity: number;
     averageCost: number;
     currentPrice: number | null;
+    currentPriceSource?: string | null;
+    priceStatus?: string;
     currentValue: number;
     unrealizedGain: number;
     gainPct: number;
+    allocationPct?: number;
     riskLevel: string;
+    riskScore?: number;
     decision: string;
     crawlerVerdict?: string;
     crawlerNotices?: number;
     crawlerSources?: number;
+    crawlerFailedSources?: number;
+    evidenceLabel?: string;
     action: string;
   }>;
 }
@@ -269,12 +285,18 @@ export class NotificationsService {
       { type: 'mrkdwn', text: `*Cost Basis*\n${this.formatMoney(report.totalCost)}` },
       { type: 'mrkdwn', text: `*Unrealized P/L*\n${this.formatMoney(report.unrealizedGain)} (${report.gainPct.toFixed(2)}%)` },
       { type: 'mrkdwn', text: `*Risk Score*\n${report.riskScore.toFixed(0)}/100` },
+      { type: 'mrkdwn', text: `*Net P/L*\n${this.formatMoney(report.netPnl ?? report.unrealizedGain)}` },
+      { type: 'mrkdwn', text: `*Day Move*\n${this.formatMoney(report.dayGain ?? 0)} (${(report.dayGainPct ?? 0).toFixed(2)}%)` },
     ];
+    const quality = report.dataQuality?.length
+      ? `\n*Data quality*\n${report.dataQuality.slice(0, 4).join('\n')}`
+      : '';
+    const concentration = report.concentrationWarning ? `\n*Concentration*\n${report.concentrationWarning}` : '';
     const rows = topRows.length
       ? topRows
           .map(
             (h) =>
-              `*${h.symbol}* ${h.decision.replace('_', ' ')} · ${h.riskLevel} · ${h.gainPct.toFixed(2)}% · Crawl ${h.crawlerVerdict ?? 'N/A'} (${h.crawlerNotices ?? 0}/${h.crawlerSources ?? 0}) · ${h.action}`,
+              `*${h.symbol}* ${h.decision.replace('_', ' ')} · ${h.riskLevel}${h.riskScore ? ` ${h.riskScore.toFixed(0)}/100` : ''} · ${h.gainPct.toFixed(2)}% · ${h.allocationPct?.toFixed(2) ?? '0.00'}% alloc · ${h.priceStatus ?? 'unknown'} price · Crawl ${h.crawlerVerdict ?? 'N/A'}: ${h.evidenceLabel ?? `${h.crawlerNotices ?? 0} matched notices · ${h.crawlerSources ?? 0} usable sources`} · ${h.action}`,
           )
           .join('\n')
       : 'No holdings found.';
@@ -283,7 +305,7 @@ export class NotificationsService {
       text: `TradePing Portfolio Bot: ${report.status}`,
       blocks: [
         { type: 'header', text: { type: 'plain_text', text: 'Portfolio Bot Analysis', emoji: true } },
-        { type: 'section', text: { type: 'mrkdwn', text: `*${report.status}* · ${report.reason}\n${report.summary}` } },
+        { type: 'section', text: { type: 'mrkdwn', text: `*${report.status}* · ${report.reason}\n${report.summary}${concentration}${quality}` } },
         { type: 'section', fields },
         { type: 'section', text: { type: 'mrkdwn', text: rows } },
         {

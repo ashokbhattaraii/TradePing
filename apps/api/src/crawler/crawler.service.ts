@@ -2144,6 +2144,27 @@ export class CrawlerService implements OnModuleInit, OnModuleDestroy {
     }));
   }
 
+  /** Refreshes cache misses for a bounded symbol set and returns their latest known prices. */
+  async getFreshPricesForSymbols(rawSymbols: string[]): Promise<PriceSummary[]> {
+    const symbols = this.normalizeSymbols(rawSymbols).slice(0, 100);
+    if (symbols.length === 0) return [];
+
+    if (this.priceCache.size === 0) {
+      await this.prefetch().catch((err) => {
+        this.logs.warn(`Portfolio price prefetch failed: ${(err as Error).message}`);
+      });
+    }
+
+    const refreshNeeded = symbols.filter((symbol) => {
+      const cached = this.priceCache.get(symbol);
+      return !cached || cached.source !== 'LIVE' || Date.now() - cached.ts > this.pageCacheTtlMs;
+    });
+    await Promise.allSettled(refreshNeeded.map((symbol) => this.fetchPrice(symbol as StockSymbol)));
+
+    const latest = new Map(this.getLatestPrices().map((price) => [price.symbol, price]));
+    return symbols.map((symbol) => latest.get(symbol)).filter((price): price is PriceSummary => Boolean(price));
+  }
+
   async refreshPrices() {
     this.pageCache = null;
     await this.prefetch();

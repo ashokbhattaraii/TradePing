@@ -32,6 +32,7 @@ import {
   type CrawlPredictionReport,
   type PortfolioAnalysisReport,
   type PortfolioHolding,
+  type PortfolioTransaction,
   type PriceSummary,
   type PreTradeRiskReport,
   type StockCommandReport,
@@ -121,6 +122,13 @@ function insideCircuit(price: number | null | undefined, target: number) {
   return !bounds || (target >= bounds.lower && target <= bounds.upper);
 }
 
+function priceStatusTone(status?: PortfolioAnalysisReport['holdings'][number]['priceStatus']): Tone {
+  if (status === 'live') return 'success';
+  if (status === 'stale') return 'warn';
+  if (status === 'fallback' || status === 'missing') return 'danger';
+  return 'default';
+}
+
 function stockLabel(stock: PriceSummary) {
   return stock.name && stock.name !== stock.symbol ? `${stock.symbol} - ${stock.name}` : stock.symbol;
 }
@@ -170,6 +178,7 @@ export function PortfolioBotCommandCenter({
   const [running, setRunning] = useState(false);
   const [busyAction, setBusyAction] = useState('');
   const [holdings, setHoldings] = useState<PortfolioHolding[]>([]);
+  const [transactions, setTransactions] = useState<PortfolioTransaction[]>([]);
   const [latestAnalysis, setLatestAnalysis] = useState<PortfolioAnalysisReport | null>(null);
   const [analysisHistory, setAnalysisHistory] = useState<PortfolioAnalysisReport[]>([]);
   const [settings, setSettings] = useState<SystemSettings | null>(null);
@@ -179,9 +188,18 @@ export function PortfolioBotCommandCenter({
   const [quantity, setQuantity] = useState('');
   const [averageCost, setAverageCost] = useState('');
   const [holdingNote, setHoldingNote] = useState('');
+  const [transactionType, setTransactionType] = useState('BUY');
+  const [transactionQuantity, setTransactionQuantity] = useState('');
+  const [transactionPrice, setTransactionPrice] = useState('');
+  const [transactionFees, setTransactionFees] = useState('');
+  const [transactionTaxes, setTransactionTaxes] = useState('');
+  const [transactionAmount, setTransactionAmount] = useState('');
+  const [transactionRealizedPnl, setTransactionRealizedPnl] = useState('');
+  const [transactionNote, setTransactionNote] = useState('');
   const [notifySlack, setNotifySlack] = useState(true);
   const selectedStock = stockOptions.find((stock) => stock.symbol === symbol) ?? null;
   const selectedAlerts = alerts.filter((alert) => alert.symbol === symbol);
+  const selectedTransactions = transactions.filter((transaction) => transaction.symbol === symbol);
   const selectedWatchlist = watchlists.find((list) => list.id === activeWatchlistId) ?? watchlists[0] ?? null;
   const watched = Boolean(selectedWatchlist?.symbols.includes(symbol));
   const finalDecision = nextDecision(riskReport, commandReport, crawlReport);
@@ -196,13 +214,15 @@ export function PortfolioBotCommandCenter({
   const loadPortfolioData = async () => {
     setPortfolioLoading(true);
     try {
-      const [holdingRes, analysisRes, historyRes, settingsRes] = await Promise.all([
+      const [holdingRes, transactionRes, analysisRes, historyRes, settingsRes] = await Promise.all([
         api.listPortfolioHoldings(),
+        api.listPortfolioTransactions(),
         api.latestPortfolioAnalysis(),
         api.portfolioAnalysisHistory(),
         api.getSettings(),
       ]);
       setHoldings(holdingRes.data);
+      setTransactions(transactionRes.data);
       setLatestAnalysis(analysisRes.data);
       setAnalysisHistory(historyRes.data);
       setSettings(settingsRes.data);
@@ -311,6 +331,69 @@ export function PortfolioBotCommandCenter({
       push('info', `${holding.symbol} removed from portfolio`);
     } catch (err) {
       push('error', (err as Error).message || 'Failed to remove portfolio holding.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const saveTransaction = async () => {
+    if (!symbol) {
+      push('error', 'Select a stock before saving a transaction.');
+      return;
+    }
+    const numberOrUndefined = (value: string) => {
+      if (!value.trim()) return undefined;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : Number.NaN;
+    };
+    const quantityValue = numberOrUndefined(transactionQuantity);
+    const priceValue = numberOrUndefined(transactionPrice);
+    const feesValue = numberOrUndefined(transactionFees);
+    const taxesValue = numberOrUndefined(transactionTaxes);
+    const amountValue = numberOrUndefined(transactionAmount);
+    const realizedValue = numberOrUndefined(transactionRealizedPnl);
+    if ([quantityValue, priceValue, feesValue, taxesValue, amountValue, realizedValue].some((value) => Number.isNaN(value))) {
+      push('error', 'Enter valid transaction numbers.');
+      return;
+    }
+
+    setBusyAction('save-transaction');
+    try {
+      const res = await api.savePortfolioTransaction({
+        symbol,
+        type: transactionType,
+        quantity: quantityValue,
+        price: priceValue,
+        fees: feesValue,
+        taxes: taxesValue,
+        amount: amountValue,
+        realizedPnl: realizedValue,
+        note: transactionNote,
+      });
+      setTransactions((current) => [res.data, ...current].slice(0, 100));
+      setTransactionQuantity('');
+      setTransactionPrice('');
+      setTransactionFees('');
+      setTransactionTaxes('');
+      setTransactionAmount('');
+      setTransactionRealizedPnl('');
+      setTransactionNote('');
+      push('success', `${res.data.symbol} transaction saved`);
+    } catch (err) {
+      push('error', (err as Error).message || 'Failed to save portfolio transaction.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const removeTransaction = async (transaction: PortfolioTransaction) => {
+    setBusyAction(`delete-transaction-${transaction.id}`);
+    try {
+      await api.deletePortfolioTransaction(transaction.id);
+      setTransactions((current) => current.filter((item) => item.id !== transaction.id));
+      push('info', `${transaction.symbol} transaction removed`);
+    } catch (err) {
+      push('error', (err as Error).message || 'Failed to remove portfolio transaction.');
     } finally {
       setBusyAction('');
     }
@@ -647,6 +730,144 @@ export function PortfolioBotCommandCenter({
                   )}
                 </div>
 
+                <div className="grid gap-3 rounded-lg border border-white/10 bg-black/15 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-white">Transaction Ledger</span>
+                    <Badge tone="default">{selectedTransactions.length} rows</Badge>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="block">
+                      <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Type</span>
+                      <Select
+                        name="portfolioTransactionType"
+                        aria-label="Select transaction type"
+                        value={transactionType}
+                        onChange={(event) => setTransactionType(event.target.value)}
+                      >
+                        {['BUY', 'SELL', 'DIVIDEND', 'BONUS', 'FEE', 'TAX', 'ADJUSTMENT'].map((type) => (
+                          <option key={type} value={type} className="bg-zinc-900">
+                            {type}
+                          </option>
+                        ))}
+                      </Select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Quantity</span>
+                      <Input
+                        name="portfolioTransactionQuantity"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        autoComplete="off"
+                        value={transactionQuantity}
+                        onChange={(event) => setTransactionQuantity(event.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Price</span>
+                      <Input
+                        name="portfolioTransactionPrice"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        autoComplete="off"
+                        value={transactionPrice}
+                        onChange={(event) => setTransactionPrice(event.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Realized P/L</span>
+                      <Input
+                        name="portfolioTransactionRealizedPnl"
+                        type="number"
+                        inputMode="decimal"
+                        autoComplete="off"
+                        value={transactionRealizedPnl}
+                        onChange={(event) => setTransactionRealizedPnl(event.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Fees</span>
+                      <Input
+                        name="portfolioTransactionFees"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        autoComplete="off"
+                        value={transactionFees}
+                        onChange={(event) => setTransactionFees(event.target.value)}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Taxes</span>
+                      <Input
+                        name="portfolioTransactionTaxes"
+                        type="number"
+                        inputMode="decimal"
+                        min={0}
+                        autoComplete="off"
+                        value={transactionTaxes}
+                        onChange={(event) => setTransactionTaxes(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Amount / Dividend</span>
+                    <Input
+                      name="portfolioTransactionAmount"
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      autoComplete="off"
+                      value={transactionAmount}
+                      onChange={(event) => setTransactionAmount(event.target.value)}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">Transaction Note</span>
+                    <Input
+                      name="portfolioTransactionNote"
+                      autoComplete="off"
+                      placeholder="Broker, contract, dividend, adjustment…"
+                      value={transactionNote}
+                      onChange={(event) => setTransactionNote(event.target.value)}
+                    />
+                  </label>
+                  <Button type="button" variant="secondary" onClick={saveTransaction} loading={busyAction === 'save-transaction'} disabled={!symbol}>
+                    <GitCompareArrows className="h-4 w-4" aria-hidden="true" />
+                    Save Transaction
+                  </Button>
+                  <div className="max-h-40 space-y-2 overflow-y-auto pr-1">
+                    {selectedTransactions.slice(0, 5).map((transaction) => (
+                      <div key={transaction.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 rounded-md border border-white/10 bg-white/[0.03] p-2">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge tone={transaction.type === 'SELL' ? 'warn' : transaction.type === 'DIVIDEND' ? 'success' : 'default'}>{transaction.type}</Badge>
+                            <span className="font-mono text-xs text-white/60">
+                              {money(transaction.quantity)} @ Rs. {money(transaction.price)}
+                            </span>
+                          </div>
+                          <p className="mt-1 truncate text-xs text-white/35">
+                            Net {transaction.realizedPnl >= 0 ? '+' : ''}Rs. {money(transaction.realizedPnl)} · {new Date(transaction.tradedAt).toLocaleDateString()}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          aria-label={`Remove ${transaction.symbol} ${transaction.type} transaction`}
+                          onClick={() => void removeTransaction(transaction)}
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/35 transition-colors hover:bg-red-400/10 hover:text-red-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
+                        >
+                          {busyAction === `delete-transaction-${transaction.id}` ? (
+                            <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" aria-hidden="true" />
+                          )}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/15 px-3 py-2">
                   <span className="text-sm text-white/65">Request Slack summary</span>
                   <input
@@ -969,6 +1190,12 @@ function PortfolioPerformanceTable({
 }) {
   const analysisBySymbol = new Map((report?.holdings ?? []).map((holding) => [holding.symbol, holding]));
   const priceBySymbol = new Map(stocks.map((stock) => [stock.symbol, stock]));
+  const estimatedTotalValue = holdings.reduce((sum, holding) => {
+    const analysis = analysisBySymbol.get(holding.symbol);
+    const live = priceBySymbol.get(holding.symbol);
+    const currentPrice = analysis?.currentPrice ?? live?.price ?? holding.averageCost;
+    return sum + currentPrice * holding.quantity;
+  }, 0);
 
   return (
     <div className="rounded-lg border border-white/10 bg-black/15 p-5">
@@ -989,9 +1216,9 @@ function PortfolioPerformanceTable({
               <th className="px-3 py-1 text-right">LTP</th>
               <th className="px-3 py-1 text-right">Value</th>
               <th className="px-3 py-1 text-right">P/L</th>
-                <th className="px-3 py-1 text-right">Alloc</th>
-                <th className="px-3 py-1">Crawler</th>
-                <th className="px-3 py-1">Bot Action</th>
+              <th className="px-3 py-1 text-right">Alloc</th>
+              <th className="px-3 py-1">Crawler</th>
+              <th className="px-3 py-1">Bot Action</th>
             </tr>
           </thead>
           <tbody>
@@ -1008,6 +1235,8 @@ function PortfolioPerformanceTable({
                 const cost = analysis?.costBasis ?? holding.averageCost * holding.quantity;
                 const gain = analysis?.unrealizedGain ?? value - cost;
                 const gainPct = analysis?.gainPct ?? (cost > 0 ? (gain / cost) * 100 : 0);
+                const allocationPct = analysis?.allocationPct ?? (estimatedTotalValue > 0 ? (value / estimatedTotalValue) * 100 : 0);
+                const priceStatus = analysis?.priceStatus ?? (live ? 'live' : 'fallback');
                 const positive = gain >= 0;
                 return (
                   <tr key={holding.id} className="group">
@@ -1017,19 +1246,24 @@ function PortfolioPerformanceTable({
                     </td>
                     <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white/75">{money(holding.quantity)}</td>
                     <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white/75">Rs. {money(holding.averageCost)}</td>
-                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white">Rs. {money(currentPrice)}</td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right">
+                      <div className="font-mono text-white">Rs. {money(currentPrice)}</div>
+                      <div className="mt-1 flex justify-end">
+                        <Badge tone={priceStatusTone(priceStatus)}>{priceStatus}</Badge>
+                      </div>
+                    </td>
                     <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white">Rs. {money(value)}</td>
                     <td className={cn('border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono', positive ? 'text-emerald-300' : 'text-red-300')}>
                       {positive ? '+' : ''}Rs. {money(gain)}<br />
                       <span className="text-xs">{positive ? '+' : ''}{gainPct.toFixed(2)}%</span>
                     </td>
-                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white/75">{(analysis?.allocationPct ?? 0).toFixed(2)}%</td>
+                    <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3 text-right font-mono text-white/75">{allocationPct.toFixed(2)}%</td>
                     <td className="border-y border-white/10 bg-white/[0.03] px-3 py-3">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <Badge tone={analysis?.crawlerVerdict === 'RISK' ? 'danger' : analysis?.crawlerVerdict === 'BULLISH' ? 'success' : analysis ? 'info' : 'default'}>
                           {analysis?.crawlerVerdict ?? 'Pending'}
                         </Badge>
-                        {analysis && <span className="font-mono text-xs text-white/45">{analysis.crawlerNotices}/{analysis.crawlerSources}</span>}
+                        {analysis && <span className="text-xs text-white/45">{analysis.evidenceLabel}</span>}
                       </div>
                       <p className="mt-1 line-clamp-2 text-xs leading-5 text-white/35">{analysis?.crawlerSummary ?? 'Auto crawl runs with portfolio analysis.'}</p>
                     </td>
@@ -1077,7 +1311,7 @@ function AutomationHistoryPanel({ history, loading }: { history: PortfolioAnalys
                 <p className="mt-1 truncate text-xs text-white/45">{new Date(run.generatedAt).toLocaleString()}</p>
               </div>
               <InfoPill label="Value" value={`Rs. ${money(run.currentValue)}`} />
-              <InfoPill label="P/L" value={`${run.unrealizedGain >= 0 ? '+' : ''}${run.gainPct.toFixed(2)}%`} tone={run.unrealizedGain >= 0 ? 'success' : 'danger'} />
+              <InfoPill label="Net P/L" value={`${run.netPnl >= 0 ? '+' : ''}Rs. ${money(run.netPnl)}`} tone={run.netPnl >= 0 ? 'success' : 'danger'} />
               <InfoPill label="Risk" value={`${run.riskScore.toFixed(0)}/100`} />
             </div>
           ))
@@ -1209,7 +1443,7 @@ function PortfolioAnalysisPanel({ report, loading }: { report: PortfolioAnalysis
             Last run {new Date(report.generatedAt).toLocaleString()} {report.nextRunAt ? `· Next scheduled ${new Date(report.nextRunAt).toLocaleString()}` : ''}
           </div>
         </div>
-        <div className="grid min-w-72 grid-cols-2 gap-2">
+        <div className="grid min-w-72 grid-cols-2 gap-2 xl:grid-cols-3">
           <InfoPill label="Value" value={`Rs. ${money(report.currentValue)}`} />
           <InfoPill label="Cost" value={`Rs. ${money(report.totalCost)}`} />
           <InfoPill
@@ -1217,9 +1451,40 @@ function PortfolioAnalysisPanel({ report, loading }: { report: PortfolioAnalysis
             value={`${positive ? '+' : ''}Rs. ${money(report.unrealizedGain)}`}
             tone={positive ? 'success' : 'danger'}
           />
+          <InfoPill label="Net P/L" value={`${report.netPnl >= 0 ? '+' : ''}Rs. ${money(report.netPnl)}`} tone={report.netPnl >= 0 ? 'success' : 'danger'} />
+          <InfoPill label="Day Move" value={`${report.dayGain >= 0 ? '+' : ''}${report.dayGainPct.toFixed(2)}%`} tone={report.dayGain >= 0 ? 'success' : 'danger'} />
           <InfoPill label="Risk" value={`${report.riskScore.toFixed(0)}/100`} tone={statusTone} />
         </div>
       </div>
+
+      {(report.concentrationWarning || report.dataQuality.length > 0 || report.sectorAllocations.length > 0) && (
+        <div className="mt-4 grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.65fr)]">
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+            <div className="flex flex-wrap gap-2">
+              {report.concentrationWarning && <Badge tone="danger">{report.concentrationWarning}</Badge>}
+              {report.dataQuality.length === 0 ? (
+                <Badge tone="success">All holdings priced from live data</Badge>
+              ) : (
+                report.dataQuality.slice(0, 4).map((note) => (
+                  <Badge key={note} tone="warn">
+                    {note}
+                  </Badge>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+            <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-white/35">Sector Exposure</div>
+            <div className="flex flex-wrap gap-2">
+              {report.sectorAllocations.slice(0, 4).map((sector) => (
+                <Badge key={sector.sector} tone={sector.allocationPct >= 50 ? 'warn' : 'default'}>
+                  {sector.sector}: {sector.allocationPct.toFixed(2)}%
+                </Badge>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="mt-5 grid gap-3">
         {report.holdings.map((holding) => {
@@ -1231,11 +1496,15 @@ function PortfolioAnalysisPanel({ report, loading }: { report: PortfolioAnalysis
                   <span className="font-mono text-sm font-semibold text-white">{holding.symbol}</span>
                   <Badge tone={holding.decision === 'AVOID' ? 'danger' : holding.decision === 'WAIT' ? 'warn' : 'success'}>{holding.decision.replace('_', ' ')}</Badge>
                   <Badge tone={holding.riskScore >= 65 ? 'danger' : holding.riskScore >= 38 ? 'warn' : 'success'}>{holding.riskLevel}</Badge>
+                  <Badge tone={priceStatusTone(holding.priceStatus)}>{holding.priceStatus} price</Badge>
+                  <Badge tone={holding.concentrationRisk === 'EXTREME' || holding.concentrationRisk === 'HIGH' ? 'danger' : holding.concentrationRisk === 'MODERATE' ? 'warn' : 'default'}>
+                    {holding.concentrationRisk} concentration
+                  </Badge>
                 </div>
                 {holding.name && <p className="mt-1 truncate text-xs text-white/35">{holding.name}</p>}
                 <p className="mt-1 line-clamp-2 text-xs leading-5 text-white/45">{holding.action}</p>
                 <p className="mt-1 line-clamp-1 text-xs text-sky-200/55">
-                  Crawl {holding.crawlerVerdict} · {holding.crawlerNotices} notices · {holding.crawlerSources} sources
+                  Crawl {holding.crawlerVerdict} · {holding.evidenceLabel}
                 </p>
               </div>
               <InfoPill label="Allocation" value={`${holding.allocationPct.toFixed(2)}%`} />

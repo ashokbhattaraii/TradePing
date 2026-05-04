@@ -507,14 +507,40 @@ export interface PortfolioHolding {
   updatedAt: string;
 }
 
+export interface PortfolioTransaction {
+  id: string;
+  symbol: string;
+  type: string;
+  quantity: number;
+  price: number;
+  fees: number;
+  taxes: number;
+  amount: number;
+  realizedPnl: number;
+  note: string | null;
+  tradedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PortfolioHoldingAnalysis extends PortfolioHolding {
   name?: string;
   currentPrice: number | null;
+  currentPriceSource: string | null;
+  priceStatus: 'live' | 'stale' | 'fallback' | 'missing';
+  priceTimestamp: string | null;
   currentValue: number;
   costBasis: number;
   unrealizedGain: number;
   gainPct: number;
+  dayChangePct: number;
+  dayGain: number;
+  previousValue: number | null;
+  sinceLastRunPct: number | null;
   allocationPct: number;
+  sector: string;
+  concentrationRisk: 'LOW' | 'MODERATE' | 'HIGH' | 'EXTREME';
+  liquidityRisk: 'LOW' | 'MODERATE' | 'HIGH';
   riskLevel: string;
   riskScore: number;
   decision: string;
@@ -523,10 +549,19 @@ export interface PortfolioHoldingAnalysis extends PortfolioHolding {
   crawlerConfidence: number;
   crawlerNotices: number;
   crawlerSources: number;
+  crawlerFailedSources: number;
+  evidenceLabel: string;
   crawlerSummary: string;
   action: string;
   alertIdeas: { condition: 'ABOVE' | 'BELOW'; targetPrice: number; reason: string }[];
   evidence: string[];
+  dataQuality: string[];
+  transactionCount: number;
+  realizedGain: number;
+  fees: number;
+  taxes: number;
+  dividends: number;
+  netPnl: number;
 }
 
 export interface PortfolioAnalysisReport {
@@ -541,6 +576,18 @@ export interface PortfolioAnalysisReport {
   riskScore: number;
   summary: string;
   holdings: PortfolioHoldingAnalysis[];
+  dataQuality: string[];
+  priceStatusCounts: Record<'live' | 'stale' | 'fallback' | 'missing', number>;
+  sectorAllocations: { sector: string; allocationPct: number; value: number }[];
+  concentrationWarning: string | null;
+  realizedGain: number;
+  fees: number;
+  taxes: number;
+  dividends: number;
+  netPnl: number;
+  dayGain: number;
+  dayGainPct: number;
+  sinceLastRunPct: number | null;
   nextRunAt: string | null;
   notifiedAt?: string | null;
 }
@@ -626,11 +673,33 @@ export const api = {
     request<ApiResponse<Watchlist>>(`/watchlists/${id}/symbols/${encodeURIComponent(symbol)}`, { method: 'DELETE' }),
   // ── Portfolio Bot ────────────────────────────────────────────────────────
   listPortfolioHoldings: () => request<ApiResponse<PortfolioHolding[]>>('/portfolio/holdings'),
+  listPortfolioTransactions: (symbol?: string) =>
+    request<ApiResponse<PortfolioTransaction[]>>(
+      `/portfolio/transactions${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''}`,
+    ),
   savePortfolioHolding: (body: { symbol: string; quantity: number; averageCost: number; note?: string }) =>
     request<ApiResponse<PortfolioHolding>>('/portfolio/holdings', {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  savePortfolioTransaction: (body: {
+    symbol: string;
+    type: string;
+    quantity?: number;
+    price?: number;
+    fees?: number;
+    taxes?: number;
+    amount?: number;
+    realizedPnl?: number;
+    tradedAt?: string;
+    note?: string;
+  }) =>
+    request<ApiResponse<PortfolioTransaction>>('/portfolio/transactions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deletePortfolioTransaction: (id: string) =>
+    request<ApiResponse<{ id: string }>>(`/portfolio/transactions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   updatePortfolioHolding: (id: string, body: { quantity?: number; averageCost?: number; note?: string }) =>
     request<ApiResponse<PortfolioHolding>>(`/portfolio/holdings/${encodeURIComponent(id)}`, {
       method: 'PATCH',
